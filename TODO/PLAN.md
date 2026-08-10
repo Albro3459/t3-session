@@ -651,13 +651,13 @@ Skill documentation should focus on the recovery workflow:
 - [x] Implement normalized output.
 - [x] Add SQLite fixtures and integration tests.
 
-### Phase 3: CLI output
+### Phase 3: CLI output ✅
 
-- Implement human output.
-- Implement `--format json`.
-- Implement `--format jsonl`.
-- Implement stable errors and exit codes.
-- Add CLI integration tests.
+- [x] Implement human output.
+- [x] Implement `--format json`.
+- [x] Implement `--format jsonl`.
+- [x] Implement stable errors and exit codes.
+- [x] Add CLI integration tests.
 
 ### Phase 4: title search and doctor
 
