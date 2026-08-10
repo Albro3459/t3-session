@@ -4,7 +4,14 @@ import path from "node:path";
 import { ConfigurationError } from "./errors.js";
 
 export const DEFAULT_T3_HOME = path.join(os.homedir(), ".t3");
-const SAFE_THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const SAFE_THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+
+function hasControlCharacter(value) {
+  return [...value].some((character) => {
+    const code = character.codePointAt(0);
+    return code < 0x20 || code === 0x7f;
+  });
+}
 
 function resolvePath(value, { cwd, homeDirectory }) {
   const expanded = value === "~" ? homeDirectory : value.startsWith("~/") ? path.join(homeDirectory, value.slice(2)) : value;
@@ -36,10 +43,15 @@ export function resolveConfig({ home, db, env = process.env, cwd = process.cwd()
   });
 }
 
-export function resolveProviderLogPath(config, threadId) {
-  if (typeof threadId !== "string" || !SAFE_THREAD_ID.test(threadId)) {
+export function validateThreadId(threadId) {
+  if (typeof threadId !== "string" || !SAFE_THREAD_ID.test(threadId) || hasControlCharacter(threadId)) {
     throw new ConfigurationError("threadId must be a non-empty path-safe value.", { field: "threadId" });
   }
 
+  return threadId;
+}
+
+export function resolveProviderLogPath(config, threadId) {
+  validateThreadId(threadId);
   return path.join(config.providerLogDirectory, `events.${threadId}.log`);
 }

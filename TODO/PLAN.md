@@ -642,14 +642,14 @@ Skill documentation should focus on the recovery workflow:
 - [x] Add `--help`, `--version`, and command dispatch.
 - [x] Add test runner configuration/scripts.
 
-### Phase 2: SQLite retrieval
+### Phase 2: SQLite retrieval ✅
 
-- Implement read-only database opening.
-- Validate required tables.
-- Implement exact thread retrieval.
-- Implement project, message, activity, turn, and provider joins.
-- Implement normalized output.
-- Add SQLite fixtures and integration tests.
+- [x] Implement read-only database opening.
+- [x] Validate required tables.
+- [x] Implement exact thread retrieval.
+- [x] Implement project, message, activity, turn, and provider joins.
+- [x] Implement normalized output.
+- [x] Add SQLite fixtures and integration tests.
 
 ### Phase 3: CLI output
 

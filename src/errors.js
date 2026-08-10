@@ -53,6 +53,45 @@ export class UnknownCommandError extends InvalidArgumentsError {
   }
 }
 
+export class ThreadNotFoundError extends T3SessionError {
+  constructor(threadId) {
+    super("No thread matched the supplied ID.", {
+      code: "THREAD_NOT_FOUND",
+      exitCode: EXIT_CODES.THREAD_NOT_FOUND,
+      details: { threadId },
+    });
+    this.name = "ThreadNotFoundError";
+  }
+}
+
+export class DatabaseUnavailableError extends T3SessionError {
+  constructor(message, details = {}, cause) {
+    super(message, {
+      code: "DATABASE_UNAVAILABLE",
+      exitCode: EXIT_CODES.DATABASE_UNAVAILABLE,
+      details,
+      cause,
+    });
+    this.name = "DatabaseUnavailableError";
+  }
+}
+
+export class SchemaUnavailableError extends DatabaseUnavailableError {
+  constructor(missingTables = [], details = {}) {
+    const missingColumns = details.missingColumns || {};
+    const missingDescription = missingTables.length > 0
+      ? "required projection tables"
+      : "required projection columns";
+    super(`The SQLite database is missing ${missingDescription}.`, {
+      ...details,
+      missingTables,
+      missingColumns,
+    });
+    this.name = "SchemaUnavailableError";
+    this.code = "SCHEMA_UNAVAILABLE";
+  }
+}
+
 export class NotImplementedError extends T3SessionError {
   constructor(command) {
     super(`The \"${command}\" command is not implemented yet.`, {
