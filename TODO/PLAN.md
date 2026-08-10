@@ -634,13 +634,13 @@ Skill documentation should focus on the recovery workflow:
 
 ## 15. Implementation sequence
 
-### Phase 1: package skeleton
+### Phase 1: package skeleton ✅
 
-- Add `package.json`.
-- Add executable entry point.
-- Add configuration and error modules.
-- Add `--help`, `--version`, and command dispatch.
-- Add test runner configuration/scripts.
+- [x] Add `package.json`.
+- [x] Add executable entry point.
+- [x] Add configuration and error modules.
+- [x] Add `--help`, `--version`, and command dispatch.
+- [x] Add test runner configuration/scripts.
 
 ### Phase 2: SQLite retrieval
 
