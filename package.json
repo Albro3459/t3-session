@@ -16,7 +16,12 @@
   },
   "files": [
     "scripts/",
-    "src/"
+    "src/",
+    "schemas/",
+    "skills/",
+    "README.md",
+    "LICENSE",
+    "NOTICE.txt"
   ],
   "scripts": {
     "test": "node --test",

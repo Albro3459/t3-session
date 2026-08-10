@@ -91,3 +91,21 @@ export {
   readProviderJsonl,
   PROVIDER_LABELS,
 } from "./provider-jsonl.js";
+export {
+  installBundledSkill,
+  installSkill,
+  resolveSkillInstallTarget,
+  resolveSkillDestination,
+  bundledSkillRoot,
+  resolveBundledSkillRoot,
+  validateBundledSkill,
+  SkillInstallationError,
+  SKILL_FILES,
+  SKILL_NAME,
+} from "./skill-install.js";
+export {
+  BUNDLED_SCHEMAS,
+  formatBundledSchema,
+  readBundledSchema,
+  resolveSchemaPath,
+} from "./schema.js";

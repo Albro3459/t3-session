@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://t3-session.dev/schemas/thread.v1.json",
+  "title": "t3-session normalized thread",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "toolVersion",
+    "thread",
+    "turns",
+    "messages",
+    "activities",
+    "provider",
+    "warnings"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "t3-session.thread.v1" },
+    "toolVersion": { "type": "string" },
+    "thread": {
+      "type": "object",
+      "required": ["id", "projectId", "title", "project", "createdAt", "updatedAt"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "projectId": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
+        "project": {
+          "type": ["object", "null"],
+          "properties": {
+            "title": { "type": ["string", "null"] },
+            "workspaceRoot": { "type": ["string", "null"] }
+          },
+          "additionalProperties": true
+        },
+        "branch": { "type": ["string", "null"] },
+        "worktreePath": { "type": ["string", "null"] },
+        "createdAt": { "type": ["string", "null"] },
+        "updatedAt": { "type": ["string", "null"] },
+        "latestTurnId": { "type": ["string", "null"] },
+        "latestUserMessageAt": { "type": ["string", "null"] },
+        "runtimeMode": { "type": ["string", "null"] },
+        "interactionMode": { "type": ["string", "null"] },
+        "modelSelection": {},
+        "workspaceRoot": { "type": ["string", "null"] },
+        "adapterSpecific": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "turns": { "type": "array", "items": { "$ref": "#/$defs/turn" } },
+    "messages": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+    "activities": { "type": "array", "items": { "$ref": "#/$defs/activity" } },
+    "provider": { "$ref": "#/$defs/provider" },
+    "warnings": { "type": "array", "items": { "$ref": "#/$defs/warning" } }
+  },
+  "$defs": {
+    "turn": {
+      "type": "object",
+      "properties": {
+        "rowId": { "type": ["integer", "null"] },
+        "threadId": { "type": ["string", "null"] },
+        "turnId": { "type": ["string", "null"] },
+        "pendingMessageId": { "type": ["string", "null"] },
+        "sourceProposedPlanThreadId": { "type": ["string", "null"] },
+        "sourceProposedPlanId": { "type": ["string", "null"] },
+        "assistantMessageId": { "type": ["string", "null"] },
+        "state": { "type": ["string", "null"] },
+        "requestedAt": { "type": ["string", "null"] },
+        "startedAt": { "type": ["string", "null"] },
+        "completedAt": { "type": ["string", "null"] },
+        "checkpointTurnCount": { "type": ["integer", "null"] },
+        "checkpointRef": { "type": ["string", "null"] },
+        "checkpointStatus": { "type": ["string", "null"] },
+        "checkpointFiles": {},
+        "adapterSpecific": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "message": {
+      "type": "object",
+      "properties": {
+        "messageId": { "type": ["string", "null"] },
+        "threadId": { "type": ["string", "null"] },
+        "turnId": { "type": ["string", "null"] },
+        "role": { "type": ["string", "null"] },
+        "text": { "type": ["string", "null"] },
+        "isStreaming": { "type": ["boolean", "null"] },
+        "createdAt": { "type": ["string", "null"] },
+        "updatedAt": { "type": ["string", "null"] },
+        "attachments": {},
+        "adapterSpecific": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "activity": {
+      "type": "object",
+      "properties": {
+        "activityId": { "type": ["string", "null"] },
+        "threadId": { "type": ["string", "null"] },
+        "turnId": { "type": ["string", "null"] },
+        "tone": { "type": ["string", "null"] },
+        "kind": { "type": ["string", "null"] },
+        "summary": { "type": ["string", "null"] },
+        "payload": {},
+        "createdAt": { "type": ["string", "null"] },
+        "sequence": { "type": ["integer", "null"] },
+        "adapterSpecific": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "provider": {
+      "type": "object",
+      "properties": {
+        "providerName": { "type": ["string", "null"] },
+        "providerSessionId": { "type": ["string", "null"] },
+        "providerThreadId": { "type": ["string", "null"] },
+        "providerInstanceId": { "type": ["string", "null"] },
+        "status": { "type": ["string", "null"] },
+        "lastError": { "type": ["string", "null"] },
+        "activeTurnId": { "type": ["string", "null"] },
+        "runtimeMode": { "type": ["string", "null"] },
+        "updatedAt": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "warning": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "field": { "type": "string" },
+        "line": { "type": "integer" },
+        "message": { "type": "string" },
+        "details": { "type": "object" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

@@ -11,6 +11,8 @@ import {
 } from "./errors.js";
 import { doctorExitCode, formatDoctorHuman } from "./doctor.js";
 import { createT3SessionClient } from "./index.js";
+import { installBundledSkill } from "./skill-install.js";
+import { formatBundledSchema } from "./schema.js";
 import {
   formatDoctorJson,
   formatFindHuman,
@@ -146,6 +148,8 @@ export function formatHelp() {
     "  schema <name>           Print a bundled schema",
     "  install --skills <agent>",
     "                          Install the bundled recovery skill",
+    "    --overwrite            Replace an existing skill directory",
+    "    --backup               Back up an existing skill before replacing",
     "  help                    Show this help",
   ].join("\n");
 }
@@ -302,6 +306,78 @@ async function handleDoctor(options) {
   };
 }
 
+function parseInstallOptions(args) {
+  if (args[0] !== "--skills") {
+    throw new InvalidArgumentsError('install requires "--skills <claude|codex>".', {
+      command: "install",
+      expected: "--skills <claude|codex>",
+    });
+  }
+
+  const agent = args[1];
+  if (agent !== "claude" && agent !== "codex") {
+    throw new InvalidArgumentsError('install requires a skills target of "claude" or "codex".', {
+      command: "install",
+      field: "skills",
+      value: agent,
+    });
+  }
+
+  let overwrite = false;
+  let backup = false;
+  for (const argument of args.slice(2)) {
+    if (argument === "--overwrite") {
+      overwrite = true;
+      continue;
+    }
+    if (argument === "--backup") {
+      backup = true;
+      continue;
+    }
+
+    throw new InvalidArgumentsError(`Unknown install option: ${argument}`, {
+      command: "install",
+      option: argument,
+    });
+  }
+
+  return { agent, overwrite, backup };
+}
+
+async function handleSchema(options) {
+  if (options.args.length !== 1 || options.args[0].startsWith("-")) {
+    throw new InvalidArgumentsError("schema requires exactly one schema name.", {
+      command: "schema",
+      expected: "schema <thread.v1|error.v1|jsonl-record.v1>",
+    });
+  }
+
+  return { output: formatBundledSchema(options.args[0]) };
+}
+
+async function handleInstall(options) {
+  if (options.title !== undefined || options.rawJsonl || options.format !== undefined) {
+    throw new InvalidArgumentsError("install only supports --skills, --overwrite, and --backup.", {
+      command: "install",
+    });
+  }
+
+  const installOptions = parseInstallOptions(options.args);
+  const result = installBundledSkill(installOptions.agent, installOptions);
+  const lines = [
+    `agent=${result.agent}`,
+    `installed-skill=${result.destination}`,
+    `source-skill=${result.source}`,
+    `package-readme=${result.packageReadme}`,
+  ];
+  if (result.backupPath) {
+    lines.push(`backup=${result.backupPath}`);
+  }
+  lines.push(`skill-md=${result.destination}/SKILL.md`);
+  lines.push(`references=${result.destination}/references`);
+  return { output: `${lines.join("\n")}\n` };
+}
+
 async function notImplemented(options) {
   throw new NotImplementedError(options.command);
 }
@@ -310,6 +386,8 @@ const commandHandlers = new Map(COMMANDS.map((command) => [command, notImplement
 commandHandlers.set("get", handleGet);
 commandHandlers.set("find", handleFind);
 commandHandlers.set("doctor", handleDoctor);
+commandHandlers.set("schema", handleSchema);
+commandHandlers.set("install", handleInstall);
 
 export async function dispatchCommand(options) {
   if (options.command === "help") {

@@ -1,0 +1,3 @@
+This package includes the t3-session recovery skill bundle for Claude and Codex agents.
+
+The bundle contains documentation and agent metadata only. It is sanitized and does not include conversation transcripts, credentials, bearer tokens, private prompts, or user storage.

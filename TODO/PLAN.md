@@ -673,13 +673,13 @@ Skill documentation should focus on the recovery workflow:
 - [x] Implement `--raw-jsonl`.
 - [x] Add malformed-line and ordering tests.
 
-### Phase 6: skill and packaging
+### Phase 6: skill and packaging ✅
 
-- Add bundled skill files.
-- Implement explicit skill installation.
-- Add README and package metadata.
-- Add package file whitelist.
-- Add installation tests.
+- [x] Add bundled skill files.
+- [x] Implement explicit skill installation.
+- [x] Add README and package metadata.
+- [x] Add package file whitelist.
+- [x] Add installation tests.
 
 ### Phase 7: verification and release preparation
 
