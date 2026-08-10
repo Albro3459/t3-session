@@ -48,6 +48,7 @@ test("parses get options before and after the command", () => {
     home: undefined,
     db: "/tmp/state.sqlite",
     format: "jsonl",
+    title: undefined,
     rawJsonl: true,
     help: false,
     version: false,
@@ -221,6 +222,106 @@ test("rejects invalid get arguments and keeps deferred raw output off stdout", (
     ]);
     assert.equal(rawResult.status, 1);
     assert.equal(parseError(rawResult).code, "NOT_IMPLEMENTED");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("finds titles through the CLI with JSON output and no diagnostics", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "find",
+      "--title",
+      "  SANITIZED RECOVERY  ",
+      "--format",
+      "json",
+      "--db",
+      fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const matches = JSON.parse(result.stdout);
+    assert.deepEqual(matches.map((match) => match.id), [ACTIVE_THREAD_ID]);
+    assert.equal(matches[0].title, "Sanitized recovery thread");
+    assert.equal(matches[0].project.title, "Sanitized project");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("doctor emits machine-readable diagnostics on stdout and uses health exit codes", () => {
+  const fixture = createFixtureDatabase();
+  const home = path.join(fixture.directory, "home");
+  fs.mkdirSync(path.join(home, "userdata", "logs", "provider"), { recursive: true });
+  try {
+    const healthyResult = runCli(fixture, [
+      "doctor",
+      "--format",
+      "json",
+      "--db",
+      fixture.databasePath,
+    ]);
+
+    assert.equal(healthyResult.status, 0);
+    assert.equal(healthyResult.stderr, "");
+    const report = JSON.parse(healthyResult.stdout);
+    assert.equal(report.schemaVersion, "t3-session.doctor.v1");
+    assert.equal(report.databaseReadable, true);
+    assert.equal(report.schemaValid, true);
+    assert.deepEqual(report.counts, { threads: 4, messages: 2, activities: 2 });
+    assert.equal(report.providerLogDirectoryPresent, true);
+
+    const missingResult = runCli(fixture, [
+      "doctor",
+      "--format",
+      "json",
+      "--db",
+      path.join(fixture.directory, "missing.sqlite"),
+    ]);
+    assert.equal(missingResult.status, 4);
+    assert.equal(missingResult.stderr, "");
+    const missingReport = JSON.parse(missingResult.stdout);
+    assert.equal(missingReport.databaseReadable, false);
+    assert.equal(missingReport.schemaValid, false);
+    assert.equal(missingReport.counts, null);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("doctor human output keeps diagnostics readable and off stderr", () => {
+  const fixture = createFixtureDatabase();
+  const home = path.join(fixture.directory, "home");
+  fs.mkdirSync(path.join(home, "userdata", "logs", "provider"), { recursive: true });
+  try {
+    const result = runCli(fixture, ["doctor", "--db", fixture.databasePath]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    assert.match(result.stdout, /T3 Session Doctor/);
+    assert.match(result.stdout, /Database readable: yes/);
+    assert.match(result.stdout, /Required columns/);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("doctor human output labels dropped required tables as table missing", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const database = new DatabaseSync(fixture.databasePath);
+    database.exec("DROP TABLE projection_turns");
+    database.close();
+
+    const result = runCli(fixture, ["doctor", "--db", fixture.databasePath]);
+
+    assert.equal(result.status, 4);
+    assert.equal(result.stderr, "");
+    assert.match(result.stdout, /- projection_turns: missing/);
+    assert.match(result.stdout, /- projection_turns: table missing/);
+    assert.doesNotMatch(result.stdout, /projection_turns: present \(table missing\)/);
   } finally {
     cleanupFixture(fixture);
   }

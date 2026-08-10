@@ -1,9 +1,13 @@
 import packageMetadata from "../package.json" with { type: "json" };
 
 import { resolveConfig, validateThreadId } from "./config.js";
+import { inspectInstallation } from "./doctor.js";
 import { NotImplementedError } from "./errors.js";
-import { normalizeThread } from "./normalize.js";
-import { readThreadFromDatabase } from "./sqlite-store.js";
+import { normalizeThread, normalizeThreadSearchResult } from "./normalize.js";
+import {
+  findThreadsFromDatabase,
+  readThreadFromDatabase,
+} from "./sqlite-store.js";
 
 export const VERSION = packageMetadata.version;
 
@@ -23,8 +27,9 @@ export async function createT3SessionClient(options = {}) {
       return normalizeThread(rows, { toolVersion: VERSION });
     },
     async findThreads(requestOptions = {}) {
-      void requestOptions;
-      return unavailable("findThreads");
+      const databasePath = requestOptions.db || requestOptions.stateDb || config.stateDb;
+      return findThreadsFromDatabase(databasePath, requestOptions.title)
+        .map(normalizeThreadSearchResult);
     },
     async readRawJsonl(threadId, requestOptions = {}) {
       void threadId;
@@ -32,8 +37,11 @@ export async function createT3SessionClient(options = {}) {
       return unavailable("readRawJsonl");
     },
     async doctor(requestOptions = {}) {
-      void requestOptions;
-      return unavailable("doctor");
+      const databasePath = requestOptions.db || requestOptions.stateDb || config.stateDb;
+      const doctorConfig = requestOptions.home === undefined
+        ? { ...config, stateDb: databasePath }
+        : resolveConfig({ home: requestOptions.home, db: databasePath });
+      return inspectInstallation({ config: doctorConfig, toolVersion: VERSION });
     },
   });
 }
@@ -51,15 +59,31 @@ export {
   UnknownCommandError,
   serializeError,
 } from "./errors.js";
-export { normalizeThread, parseJsonField, SCHEMA_VERSION } from "./normalize.js";
+export {
+  normalizeThread,
+  normalizeThreadSearchResult,
+  parseJsonField,
+  SCHEMA_VERSION,
+} from "./normalize.js";
+export {
+  DOCTOR_SCHEMA_VERSION,
+  doctorExitCode,
+  formatDoctorHuman,
+  inspectInstallation,
+} from "./doctor.js";
 export {
   READ_TIMEOUT_MS,
   REQUIRED_COLUMNS,
   REQUIRED_TABLES,
   SQL,
+  countProjectionRows,
+  findThreadsFromDatabase,
+  inspectRequiredSchema,
+  listColumns,
   listTables,
   openReadonlyDatabase,
   readThreadFromDatabase,
   retrieveThreadRows,
+  retrieveThreadSearchRows,
   validateRequiredTables,
 } from "./sqlite-store.js";

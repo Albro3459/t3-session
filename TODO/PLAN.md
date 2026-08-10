@@ -659,12 +659,12 @@ Skill documentation should focus on the recovery workflow:
 - [x] Implement stable errors and exit codes.
 - [x] Add CLI integration tests.
 
-### Phase 4: title search and doctor
+### Phase 4: title search and doctor ✅
 
-- Implement `find --title`.
-- Exclude deleted threads.
-- Implement `doctor`.
-- Add search and diagnostics tests.
+- [x] Implement `find --title`.
+- [x] Exclude deleted threads.
+- [x] Implement `doctor`.
+- [x] Add search and diagnostics tests.
 
 ### Phase 5: raw provider JSONL
 

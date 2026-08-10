@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   DatabaseUnavailableError,
+  InvalidArgumentsError,
   SchemaUnavailableError,
   ThreadNotFoundError,
 } from "./errors.js";
@@ -113,12 +114,31 @@ const PROVIDER_QUERY = `
   WHERE thread_id = ?
 `;
 
+const FIND_THREADS_QUERY = `
+  SELECT
+    t.thread_id,
+    t.project_id,
+    t.title,
+    t.created_at,
+    t.updated_at,
+    p.project_id AS project_join_id,
+    p.title AS project_title,
+    p.workspace_root
+  FROM projection_threads AS t
+  LEFT JOIN projection_projects AS p
+    ON p.project_id = t.project_id
+  WHERE t.deleted_at IS NULL
+    AND t.title COLLATE NOCASE LIKE '%' || ? || '%' ESCAPE '\\'
+  ORDER BY t.updated_at DESC
+`;
+
 export const SQL = Object.freeze({
   THREAD_QUERY,
   MESSAGES_QUERY,
   ACTIVITIES_QUERY,
   TURNS_QUERY,
   PROVIDER_QUERY,
+  FIND_THREADS_QUERY,
 });
 
 function detailsFor(path, operation) {
@@ -155,7 +175,7 @@ export function listTables(database) {
   }
 }
 
-function listColumns(database, table) {
+export function listColumns(database, table) {
   try {
     return database
       .prepare(`PRAGMA table_info(${table})`)
@@ -170,42 +190,61 @@ function listColumns(database, table) {
   }
 }
 
-export function validateRequiredTables(database) {
-  const presentTables = new Set(listTables(database));
-  const missingTables = REQUIRED_TABLES.filter((table) => !presentTables.has(table));
+export function inspectRequiredSchema(database) {
+  const presentTables = listTables(database);
+  const presentTableSet = new Set(presentTables);
+  const missingTables = REQUIRED_TABLES.filter((table) => !presentTableSet.has(table));
+  const presentColumns = {};
   const missingColumns = {};
 
   for (const table of REQUIRED_TABLES) {
-    if (!presentTables.has(table)) {
+    if (!presentTableSet.has(table)) {
       continue;
     }
 
-    const presentColumns = new Set(listColumns(database, table));
-    const missing = REQUIRED_COLUMNS[table].filter((column) => !presentColumns.has(column));
+    const columns = listColumns(database, table);
+    presentColumns[table] = columns;
+    const presentColumnSet = new Set(columns);
+    const missing = REQUIRED_COLUMNS[table].filter((column) => !presentColumnSet.has(column));
     if (missing.length > 0) {
       missingColumns[table] = missing;
     }
   }
 
-  if (missingTables.length > 0 || Object.keys(missingColumns).length > 0) {
-    throw new SchemaUnavailableError(missingTables, {
+  return {
+    valid: missingTables.length === 0 && Object.keys(missingColumns).length === 0,
+    requiredTables: [...REQUIRED_TABLES],
+    presentTables,
+    missingTables,
+    requiredColumns: REQUIRED_COLUMNS,
+    presentColumns,
+    missingColumns,
+  };
+}
+
+export function validateRequiredTables(database) {
+  const schema = inspectRequiredSchema(database);
+
+  if (!schema.valid) {
+    throw new SchemaUnavailableError(schema.missingTables, {
       operation: "validate-schema",
-      requiredTables: [...REQUIRED_TABLES],
-      requiredColumns: REQUIRED_COLUMNS,
-      missingColumns,
+      requiredTables: schema.requiredTables,
+      requiredColumns: schema.requiredColumns,
+      missingColumns: schema.missingColumns,
     });
   }
 
   return Object.freeze({
-    requiredTables: [...REQUIRED_TABLES],
-    presentTables: [...presentTables],
-    requiredColumns: REQUIRED_COLUMNS,
+    requiredTables: schema.requiredTables,
+    presentTables: schema.presentTables,
+    requiredColumns: schema.requiredColumns,
   });
 }
 
-function queryAll(database, sql, threadId, operation) {
+function queryAll(database, sql, parameters, operation) {
+  const values = Array.isArray(parameters) ? parameters : [parameters];
   try {
-    return database.prepare(sql).all(threadId);
+    return database.prepare(sql).all(...values);
   } catch (error) {
     throw new DatabaseUnavailableError(
       `Unable to retrieve ${operation} from the SQLite database.`,
@@ -213,6 +252,23 @@ function queryAll(database, sql, threadId, operation) {
       error,
     );
   }
+}
+
+function escapeLikeLiteral(value) {
+  return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
+function normalizeTitleFilter(title) {
+  if (typeof title !== "string") {
+    throw new InvalidArgumentsError("find requires a title string.", { field: "title" });
+  }
+
+  const trimmed = title.trim();
+  if (trimmed === "") {
+    throw new InvalidArgumentsError("find requires a non-empty title string.", { field: "title" });
+  }
+
+  return trimmed;
 }
 
 export function retrieveThreadRows(database, threadId) {
@@ -230,6 +286,31 @@ export function retrieveThreadRows(database, threadId) {
   };
 }
 
+export function retrieveThreadSearchRows(database, title) {
+  const titleFilter = normalizeTitleFilter(title);
+  return queryAll(
+    database,
+    FIND_THREADS_QUERY,
+    [escapeLikeLiteral(titleFilter)],
+    "thread search",
+  );
+}
+
+export function countProjectionRows(database) {
+  const count = (table, operation) => queryAll(
+    database,
+    `SELECT COUNT(*) AS count FROM ${table}`,
+    [],
+    operation,
+  )[0].count;
+
+  return {
+    threads: count("projection_threads", "thread count"),
+    messages: count("projection_thread_messages", "message count"),
+    activities: count("projection_thread_activities", "activity count"),
+  };
+}
+
 export function readThreadFromDatabase(databasePath, threadId) {
   const database = openReadonlyDatabase(databasePath);
   let transactionStarted = false;
@@ -238,6 +319,23 @@ export function readThreadFromDatabase(databasePath, threadId) {
     transactionStarted = true;
     validateRequiredTables(database);
     return retrieveThreadRows(database, threadId);
+  } finally {
+    if (transactionStarted) {
+      database.exec("ROLLBACK");
+    }
+    database.close();
+  }
+}
+
+export function findThreadsFromDatabase(databasePath, title) {
+  const titleFilter = normalizeTitleFilter(title);
+  const database = openReadonlyDatabase(databasePath);
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN DEFERRED");
+    transactionStarted = true;
+    validateRequiredTables(database);
+    return retrieveThreadSearchRows(database, titleFilter);
   } finally {
     if (transactionStarted) {
       database.exec("ROLLBACK");

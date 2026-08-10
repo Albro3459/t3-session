@@ -159,6 +159,24 @@ function normalizeProvider(row) {
   };
 }
 
+export function normalizeThreadSearchResult(row) {
+  const project = row.project_join_id === null || row.project_join_id === undefined
+    ? null
+    : {
+        title: row.project_title ?? null,
+        workspaceRoot: row.workspace_root ?? null,
+      };
+
+  return {
+    id: row.thread_id,
+    projectId: row.project_id ?? null,
+    title: row.title ?? null,
+    project,
+    createdAt: row.created_at ?? null,
+    updatedAt: row.updated_at ?? null,
+  };
+}
+
 export function normalizeThread(rows, { toolVersion = "0.1.0" } = {}) {
   const warnings = [];
   const modelSelection = parseJsonField(

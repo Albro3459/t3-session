@@ -8,8 +8,12 @@ import {
   serializeError,
   toT3SessionError,
 } from "./errors.js";
+import { doctorExitCode, formatDoctorHuman } from "./doctor.js";
 import { createT3SessionClient } from "./index.js";
 import {
+  formatDoctorJson,
+  formatFindHuman,
+  formatFindJson,
   formatThreadHuman,
   formatThreadJson,
   formatThreadJsonl,
@@ -41,6 +45,7 @@ export function parseCliArgs(argv = []) {
     home: undefined,
     db: undefined,
     format: undefined,
+    title: undefined,
     rawJsonl: false,
     help: false,
     version: false,
@@ -73,6 +78,12 @@ export function parseCliArgs(argv = []) {
 
     if (value === "--format") {
       result.format = requireOptionValue(argv, index, "--format");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--title") {
+      result.title = requireOptionValue(argv, index, "--title");
       index += 1;
       continue;
     }
@@ -116,6 +127,7 @@ export function formatHelp() {
     "Options:",
     "  --home <path>           Use a T3 home directory",
     "  --db <path>             Override the SQLite database path",
+    "  --format <format>       Use human, json, or jsonl output",
     "  -h, --help              Show this help",
     "  -v, --version           Show the package version",
     "",
@@ -126,7 +138,9 @@ export function formatHelp() {
     "    --format jsonl        One normalized record per line",
     "    --raw-jsonl            Reserved for raw provider events",
     "  find --title <text>     Find threads by title",
+    "    --format json          Emit normalized search results",
     "  doctor                  Check the local T3 installation",
+    "    --format json          Emit machine-readable diagnostics",
     "  schema <name>           Print a bundled schema",
     "  install --skills <agent>",
     "                          Install the bundled recovery skill",
@@ -136,6 +150,13 @@ export function formatHelp() {
 
 async function handleGet(options) {
   const args = options.args || [];
+  if (options.title !== undefined) {
+    throw new InvalidArgumentsError("--title is only supported by find.", {
+      command: "get",
+      option: "--title",
+    });
+  }
+
   const unknownOption = args.find((argument) => argument.startsWith("-"));
   if (unknownOption) {
     throw new InvalidArgumentsError(`Unknown option: ${unknownOption}`, {
@@ -179,12 +200,98 @@ async function handleGet(options) {
   return { output: formatThreadHuman(thread) };
 }
 
+async function handleFind(options) {
+  const args = options.args || [];
+  if (typeof options.title !== "string" || options.title.trim() === "") {
+    throw new InvalidArgumentsError("find requires a non-empty title string.", {
+      command: "find",
+      field: "title",
+    });
+  }
+
+  if (args.length !== 0) {
+    throw new InvalidArgumentsError("find does not accept positional arguments.", {
+      command: "find",
+      expected: "--title <text>",
+    });
+  }
+
+  if (options.rawJsonl) {
+    throw new InvalidArgumentsError("--raw-jsonl is only supported by get.", {
+      command: "find",
+      option: "--raw-jsonl",
+    });
+  }
+
+  const format = options.format || "human";
+  if (format !== "human" && format !== "json") {
+    throw new InvalidArgumentsError(`Unsupported output format for find: ${format}.`, {
+      command: "find",
+      format,
+      supportedFormats: ["human", "json"],
+    });
+  }
+
+  const config = options.config || resolveConfig(options);
+  const client = await createT3SessionClient({ home: config.home, db: config.stateDb });
+  const matches = await client.findThreads({ title: options.title });
+
+  return {
+    output: format === "json"
+      ? formatFindJson(matches)
+      : formatFindHuman(matches, options.title),
+  };
+}
+
+async function handleDoctor(options) {
+  const args = options.args || [];
+  if (args.length !== 0) {
+    throw new InvalidArgumentsError("doctor does not accept positional arguments.", {
+      command: "doctor",
+      expected: "doctor",
+    });
+  }
+
+  if (options.title !== undefined) {
+    throw new InvalidArgumentsError("--title is only supported by find.", {
+      command: "doctor",
+      option: "--title",
+    });
+  }
+
+  if (options.rawJsonl) {
+    throw new InvalidArgumentsError("--raw-jsonl is only supported by get.", {
+      command: "doctor",
+      option: "--raw-jsonl",
+    });
+  }
+
+  const format = options.format || "human";
+  if (format !== "human" && format !== "json") {
+    throw new InvalidArgumentsError(`Unsupported output format for doctor: ${format}.`, {
+      command: "doctor",
+      format,
+      supportedFormats: ["human", "json"],
+    });
+  }
+
+  const config = options.config || resolveConfig(options);
+  const client = await createT3SessionClient({ home: config.home, db: config.stateDb });
+  const report = await client.doctor();
+  return {
+    output: format === "json" ? formatDoctorJson(report) : formatDoctorHuman(report),
+    exitCode: doctorExitCode(report),
+  };
+}
+
 async function notImplemented(options) {
   throw new NotImplementedError(options.command);
 }
 
 const commandHandlers = new Map(COMMANDS.map((command) => [command, notImplemented]));
 commandHandlers.set("get", handleGet);
+commandHandlers.set("find", handleFind);
+commandHandlers.set("doctor", handleDoctor);
 
 export async function dispatchCommand(options) {
   if (options.command === "help") {
@@ -222,7 +329,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     if (result?.output !== undefined) {
       stdout.write(result.output);
     }
-    return 0;
+    return result?.exitCode ?? 0;
   } catch (error) {
     const normalized = toT3SessionError(error);
     writeLine(stderr, JSON.stringify(serializeError(normalized)));

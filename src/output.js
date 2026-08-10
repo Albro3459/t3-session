@@ -101,6 +101,35 @@ export function formatThreadJson(thread) {
   return `${JSON.stringify(thread, null, 2)}\n`;
 }
 
+export function formatFindJson(matches) {
+  return `${JSON.stringify(matches, null, 2)}\n`;
+}
+
+export function formatFindHuman(matches, title) {
+  const lines = ["Threads", "=======", "", `Title: ${title?.trim() || "-"}`, ""];
+  if (matches.length === 0) {
+    lines.push("No matching threads.");
+    return `${lines.join("\n")}\n`;
+  }
+
+  for (const match of matches) {
+    lines.push(
+      `${match.title || "(untitled)"}`,
+      `  ID: ${match.id}`,
+      `  Project: ${match.project?.title || "-"}`,
+      `  Updated: ${match.updatedAt || "-"}`,
+      `  Created: ${match.createdAt || "-"}`,
+      "",
+    );
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
+export function formatDoctorJson(report) {
+  return `${JSON.stringify(report, null, 2)}\n`;
+}
+
 function createRecord(type, threadId, data) {
   return {
     schemaVersion: JSONL_SCHEMA_VERSION,

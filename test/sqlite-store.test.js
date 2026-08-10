@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
   createT3SessionClient,
   DatabaseUnavailableError,
+  InvalidArgumentsError,
   SchemaUnavailableError,
   ThreadNotFoundError,
 } from "../src/index.js";
@@ -142,4 +144,136 @@ test("reports an unavailable database separately", async () => {
     client.getThread(ACTIVE_THREAD_ID),
     (error) => error instanceof DatabaseUnavailableError && error.code === "DATABASE_UNAVAILABLE",
   );
+});
+
+test("finds active titles with normalized results and literal wildcard matching", async () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const database = new DatabaseSync(fixture.databasePath);
+    const insert = database.prepare(`
+      INSERT INTO projection_threads (
+        thread_id, project_id, title, created_at, updated_at, deleted_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    insert.run(
+      "percent-thread-0001",
+      "project-1",
+      "100% coverage",
+      "2026-01-04T00:00:00.000Z",
+      "2026-01-04T00:04:00.000Z",
+      null,
+    );
+    insert.run(
+      "underscore-thread-0001",
+      "project-1",
+      "under_score",
+      "2026-01-04T00:00:00.000Z",
+      "2026-01-04T00:03:00.000Z",
+      null,
+    );
+    insert.run(
+      "quote-thread-0001",
+      "project-1",
+      "O'Reilly records",
+      "2026-01-04T00:00:00.000Z",
+      "2026-01-04T00:02:00.000Z",
+      null,
+    );
+    insert.run(
+      "sql-shaped-thread-0001",
+      "project-1",
+      "x' OR 1=1 --",
+      "2026-01-04T00:00:00.000Z",
+      "2026-01-04T00:01:00.000Z",
+      null,
+    );
+    insert.run(
+      "deleted-percent-thread-0001",
+      "project-1",
+      "100% coverage deleted",
+      "2026-01-04T00:00:00.000Z",
+      "2026-01-04T00:05:00.000Z",
+      "2026-01-04T00:06:00.000Z",
+    );
+    database.close();
+
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const percentMatches = await client.findThreads({ title: "  100%  " });
+    assert.deepEqual(percentMatches.map((match) => match.id), ["percent-thread-0001"]);
+    assert.deepEqual(percentMatches[0].project, {
+      title: "Sanitized project",
+      workspaceRoot: "/tmp/sanitized-workspace",
+    });
+
+    const underscoreMatches = await client.findThreads({ title: "UNDER_SCORE" });
+    assert.deepEqual(underscoreMatches.map((match) => match.id), ["underscore-thread-0001"]);
+
+    const quoteMatches = await client.findThreads({ title: "o'reilly" });
+    assert.deepEqual(quoteMatches.map((match) => match.id), ["quote-thread-0001"]);
+
+    const sqlMatches = await client.findThreads({ title: "' OR 1=1 --" });
+    assert.deepEqual(sqlMatches.map((match) => match.id), ["sql-shaped-thread-0001"]);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("returns a read-only doctor report with schema and counts", async () => {
+  const fixture = createFixtureDatabase();
+  const home = path.join(fixture.directory, "home");
+  fs.mkdirSync(path.join(home, "userdata", "logs", "provider"), { recursive: true });
+  try {
+    const client = await createT3SessionClient({ home, db: fixture.databasePath });
+    const report = await client.doctor();
+
+    assert.equal(report.schemaVersion, "t3-session.doctor.v1");
+    assert.equal(report.resolvedHome, home);
+    assert.equal(report.databasePath, fixture.databasePath);
+    assert.equal(report.databaseReadable, true);
+    assert.equal(report.walPresent, false);
+    assert.equal(report.schemaValid, true);
+    assert.deepEqual(report.counts, { threads: 4, messages: 2, activities: 2 });
+    assert.equal(report.providerLogDirectoryPresent, true);
+    assert.equal(report.healthy, true);
+    assert.match(report.runtimeVersion, /^v\d+/);
+
+    const alternateHome = path.join(fixture.directory, "alternate-home");
+    const overridden = await client.doctor({ home: alternateHome, db: fixture.databasePath });
+    assert.equal(overridden.resolvedHome, alternateHome);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("validates and trims public title-search input before opening SQLite", async () => {
+  const client = await createT3SessionClient({ db: "/tmp/t3-session-search-input.sqlite" });
+
+  await assert.rejects(
+    client.findThreads({ title: "   " }),
+    (error) => error instanceof InvalidArgumentsError && error.details.field === "title",
+  );
+  await assert.rejects(
+    client.findThreads(),
+    (error) => error instanceof InvalidArgumentsError && error.details.field === "title",
+  );
+});
+
+test("reports missing required columns in doctor diagnostics", async () => {
+  const fixture = createFixtureDatabase();
+  const database = new DatabaseSync(fixture.databasePath);
+  database.exec("ALTER TABLE projection_projects DROP COLUMN workspace_root");
+  database.close();
+
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const report = await client.doctor();
+
+    assert.equal(report.databaseReadable, true);
+    assert.equal(report.schemaValid, false);
+    assert.deepEqual(report.schema.missingColumns.projection_projects, ["workspace_root"]);
+    assert.equal(report.counts, null);
+    assert.equal(report.healthy, false);
+  } finally {
+    cleanupFixture(fixture);
+  }
 });
