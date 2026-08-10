@@ -4,6 +4,7 @@ import { resolveConfig } from "./config.js";
 import {
   InvalidArgumentsError,
   NotImplementedError,
+  RawJsonlPartiallyUnreadableError,
   UnknownCommandError,
   serializeError,
   toT3SessionError,
@@ -14,6 +15,7 @@ import {
   formatDoctorJson,
   formatFindHuman,
   formatFindJson,
+  formatRawJsonl,
   formatThreadHuman,
   formatThreadJson,
   formatThreadJsonl,
@@ -136,7 +138,7 @@ export function formatHelp() {
     "    --format human        Human-readable output (default)",
     "    --format json         Complete normalized thread.v1 JSON",
     "    --format jsonl        One normalized record per line",
-    "    --raw-jsonl            Reserved for raw provider events",
+    "    --raw-jsonl            Emit parsed raw provider events as JSONL",
     "  find --title <text>     Find threads by title",
     "    --format json          Emit normalized search results",
     "  doctor                  Check the local T3 installation",
@@ -181,12 +183,28 @@ async function handleGet(options) {
     });
   }
 
-  if (options.rawJsonl) {
-    throw new NotImplementedError("--raw-jsonl");
+  if (options.rawJsonl && options.format !== undefined && options.format !== "jsonl") {
+    throw new InvalidArgumentsError("--raw-jsonl only supports JSONL output.", {
+      command: "get",
+      option: "--format",
+      format: options.format,
+    });
   }
 
   const config = options.config || resolveConfig(options);
   const client = await createT3SessionClient({ home: config.home, db: config.stateDb });
+  if (options.rawJsonl) {
+    const raw = await client.readRawJsonl(args[0]);
+    const diagnostics = raw.warnings.length === 0
+      ? undefined
+      : serializeError(new RawJsonlPartiallyUnreadableError(args[0], raw.path, raw.warnings));
+    return {
+      output: formatRawJsonl(raw.records),
+      diagnostics,
+      exitCode: raw.warnings.length === 0 ? 0 : 5,
+    };
+  }
+
   const thread = await client.getThread(args[0]);
 
   if (format === "json") {
@@ -328,6 +346,9 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     const result = await dispatchCommand({ ...options, config });
     if (result?.output !== undefined) {
       stdout.write(result.output);
+    }
+    if (result?.diagnostics !== undefined) {
+      writeLine(stderr, JSON.stringify(result.diagnostics));
     }
     return result?.exitCode ?? 0;
   } catch (error) {

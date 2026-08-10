@@ -666,12 +666,12 @@ Skill documentation should focus on the recovery workflow:
 - [x] Implement `doctor`.
 - [x] Add search and diagnostics tests.
 
-### Phase 5: raw provider JSONL
+### Phase 5: raw provider JSONL ✅
 
-- Implement exact provider-log path resolution.
-- Implement prefixed JSONL parsing.
-- Implement `--raw-jsonl`.
-- Add malformed-line and ordering tests.
+- [x] Implement exact provider-log path resolution.
+- [x] Implement prefixed JSONL parsing.
+- [x] Implement `--raw-jsonl`.
+- [x] Add malformed-line and ordering tests.
 
 ### Phase 6: skill and packaging
 

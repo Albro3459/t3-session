@@ -1,19 +1,15 @@
 import packageMetadata from "../package.json" with { type: "json" };
 
-import { resolveConfig, validateThreadId } from "./config.js";
+import { resolveConfig, resolveProviderLogPath, validateThreadId } from "./config.js";
 import { inspectInstallation } from "./doctor.js";
-import { NotImplementedError } from "./errors.js";
 import { normalizeThread, normalizeThreadSearchResult } from "./normalize.js";
+import { readProviderJsonl } from "./provider-jsonl.js";
 import {
   findThreadsFromDatabase,
   readThreadFromDatabase,
 } from "./sqlite-store.js";
 
 export const VERSION = packageMetadata.version;
-
-function unavailable(method) {
-  throw new NotImplementedError(method);
-}
 
 export async function createT3SessionClient(options = {}) {
   const config = resolveConfig(options);
@@ -32,9 +28,10 @@ export async function createT3SessionClient(options = {}) {
         .map(normalizeThreadSearchResult);
     },
     async readRawJsonl(threadId, requestOptions = {}) {
-      void threadId;
+      validateThreadId(threadId);
       void requestOptions;
-      return unavailable("readRawJsonl");
+      const providerLogPath = resolveProviderLogPath(config, threadId);
+      return readProviderJsonl(providerLogPath, { threadId });
     },
     async doctor(requestOptions = {}) {
       const databasePath = requestOptions.db || requestOptions.stateDb || config.stateDb;
@@ -53,6 +50,8 @@ export {
   EXIT_CODES,
   InvalidArgumentsError,
   NotImplementedError,
+  ProviderLogUnavailableError,
+  RawJsonlPartiallyUnreadableError,
   SchemaUnavailableError,
   T3SessionError,
   ThreadNotFoundError,
@@ -87,3 +86,8 @@ export {
   retrieveThreadSearchRows,
   validateRequiredTables,
 } from "./sqlite-store.js";
+export {
+  parseProviderJsonl,
+  readProviderJsonl,
+  PROVIDER_LABELS,
+} from "./provider-jsonl.js";

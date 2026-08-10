@@ -76,6 +76,39 @@ export class DatabaseUnavailableError extends T3SessionError {
   }
 }
 
+export class ProviderLogUnavailableError extends T3SessionError {
+  constructor(threadId, filePath, reason, cause) {
+    const missing = reason === "missing";
+    super(missing ? "The provider log does not exist." : "The provider log is not readable.", {
+      code: missing ? "PROVIDER_LOG_MISSING" : "PROVIDER_LOG_UNREADABLE",
+      exitCode: EXIT_CODES.DATABASE_UNAVAILABLE,
+      details: {
+        threadId,
+        path: filePath,
+        reason,
+        error: cause instanceof Error ? cause.message : String(cause),
+      },
+      cause,
+    });
+    this.name = "ProviderLogUnavailableError";
+  }
+}
+
+export class RawJsonlPartiallyUnreadableError extends T3SessionError {
+  constructor(threadId, filePath, warnings) {
+    super("The provider JSONL contains unreadable records.", {
+      code: "RAW_JSONL_PARTIALLY_UNREADABLE",
+      exitCode: EXIT_CODES.RAW_JSONL_PARTIALLY_UNREADABLE,
+      details: {
+        threadId,
+        path: filePath,
+        warnings,
+      },
+    });
+    this.name = "RawJsonlPartiallyUnreadableError";
+  }
+}
+
 export class SchemaUnavailableError extends DatabaseUnavailableError {
   constructor(missingTables = [], details = {}) {
     const missingColumns = details.missingColumns || {};

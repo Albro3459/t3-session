@@ -30,6 +30,14 @@ function runCli(fixture, args) {
   });
 }
 
+function writeProviderLog(fixture, content, threadId = ACTIVE_THREAD_ID) {
+  const directory = path.join(fixture.directory, "home", "userdata", "logs", "provider");
+  fs.mkdirSync(directory, { recursive: true });
+  const filePath = path.join(directory, `events.${threadId}.log`);
+  fs.writeFileSync(filePath, content);
+  return filePath;
+}
+
 function parseError(result) {
   assert.equal(result.stdout, "");
   assert.notEqual(result.stderr, "");
@@ -199,7 +207,7 @@ test("reports unavailable databases and schemas with exit code 4", () => {
   }
 });
 
-test("rejects invalid get arguments and keeps deferred raw output off stdout", () => {
+test("rejects invalid get arguments and emits raw provider JSONL records", () => {
   const fixture = createFixtureDatabase();
   try {
     const invalidResult = runCli(fixture, [
@@ -213,6 +221,11 @@ test("rejects invalid get arguments and keeps deferred raw output off stdout", (
     assert.equal(invalidResult.status, 3);
     assert.equal(parseError(invalidResult).code, "INVALID_ARGUMENTS");
 
+    writeProviderLog(fixture, [
+      "[2026-08-10T10:00:00.000Z] CANON: {\"event\":\"first\"}",
+      "[2026-08-10T10:00:01.000Z] NTIVE: {\"event\":\"second\"}",
+      "",
+    ].join("\n"));
     const rawResult = runCli(fixture, [
       "get",
       ACTIVE_THREAD_ID,
@@ -220,8 +233,81 @@ test("rejects invalid get arguments and keeps deferred raw output off stdout", (
       "--db",
       fixture.databasePath,
     ]);
-    assert.equal(rawResult.status, 1);
-    assert.equal(parseError(rawResult).code, "NOT_IMPLEMENTED");
+    assert.equal(rawResult.status, 0);
+    assert.equal(rawResult.stderr, "");
+    assert.deepEqual(rawResult.stdout.trimEnd().split("\n").map((line) => JSON.parse(line)), [
+      {
+        timestamp: "2026-08-10T10:00:00.000Z",
+        label: "CANON",
+        data: { event: "first" },
+      },
+      {
+        timestamp: "2026-08-10T10:00:01.000Z",
+        label: "NTIVE",
+        data: { event: "second" },
+      },
+    ]);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("emits parsed raw records with exit code 5 when provider lines are malformed", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    writeProviderLog(fixture, [
+      "[first] CANON: {\"value\":1}",
+      "malformed provider line",
+      "[second] NTIVE: {\"value\":2}",
+    ].join("\n"));
+    const result = runCli(fixture, [
+      "get",
+      ACTIVE_THREAD_ID,
+      "--raw-jsonl",
+      "--db",
+      fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 5);
+    const records = result.stdout.trimEnd().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(records.map((record) => record.data.value), [1, 2]);
+    const diagnostic = JSON.parse(result.stderr);
+    assert.equal(diagnostic.code, "RAW_JSONL_PARTIALLY_UNREADABLE");
+    assert.equal(diagnostic.details.threadId, ACTIVE_THREAD_ID);
+    assert.equal(diagnostic.details.warnings.length, 1);
+    assert.equal(diagnostic.details.warnings[0].line, 2);
+
+    const normalResult = runCli(fixture, [
+      "get",
+      ACTIVE_THREAD_ID,
+      "--format",
+      "json",
+      "--db",
+      fixture.databasePath,
+    ]);
+    assert.equal(normalResult.status, 0);
+    assert.equal(normalResult.stderr, "");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("reports missing provider logs distinctly without writing diagnostics to stdout", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "get",
+      ACTIVE_THREAD_ID,
+      "--raw-jsonl",
+      "--db",
+      fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 4);
+    assert.equal(result.stdout, "");
+    const diagnostic = parseError(result);
+    assert.equal(diagnostic.code, "PROVIDER_LOG_MISSING");
+    assert.equal(diagnostic.details.reason, "missing");
   } finally {
     cleanupFixture(fixture);
   }

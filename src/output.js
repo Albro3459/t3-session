@@ -157,4 +157,10 @@ export function formatThreadJsonl(thread) {
   return `${jsonlRecordsForThread(thread).map((record) => JSON.stringify(record)).join("\n")}\n`;
 }
 
+export function formatRawJsonl(records) {
+  return records.length === 0
+    ? ""
+    : `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+}
+
 export { JSONL_SCHEMA_VERSION };
