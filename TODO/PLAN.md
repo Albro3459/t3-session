@@ -681,13 +681,13 @@ Skill documentation should focus on the recovery workflow:
 - [x] Add package file whitelist.
 - [x] Add installation tests.
 
-### Phase 7: verification and release preparation
+### Phase 7: verification and release preparation ✅
 
-- Run the complete test suite.
-- Run lint/static validation if configured.
-- Perform real local read-only verification.
-- Review package contents with `npm pack --dry-run`.
-- Update version and publish documentation.
+- [x] Run the complete test suite with `npm test` (42 tests passing).
+- [x] Run configured static validation with `npm run check` (no separate lint script is configured).
+- [x] Perform real local read-only verification against `/Users/alexbrodsky/.t3` using the verified thread ID; `state.sqlite` remained byte-for-byte and mtime unchanged, and the CLI returned normalized JSON, raw provider JSONL, and title-search results. Existing WAL/SHM locking state changed while the active local installation was being read.
+- [x] Review package contents with `npm pack --dry-run` (version `0.1.0`, 24 files, and the declared package whitelist are consistent).
+- [x] Confirm the first-release version remains `0.1.0` and document the installed-version check with `t3-session --version`.
 
 ## 16. Definition of done
 

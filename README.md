@@ -21,7 +21,11 @@ Or run it without a global install:
 npx @albro3459/t3-session --help
 ```
 
-The package exposes the `t3-session` executable and a small ESM API:
+The package exposes the `t3-session` executable and a small ESM API. Verify the installed package version with:
+
+```bash
+t3-session --version
+```
 
 ```js
 import { createT3SessionClient } from "@albro3459/t3-session";
@@ -108,7 +112,7 @@ t3-session install --skills codex --backup
 
 ## Privacy and read-only guarantees
 
-The package opens SQLite read-only, allows SQLite WAL/SHM files to be used, and never writes to T3 storage. It does not perform recursive discovery or broad filesystem searches. Use `--db` and temporary fixture homes for development and tests. Do not paste credentials, bearer tokens, private prompts, or unrelated local data into reports.
+The package opens SQLite read-only, allows SQLite WAL/SHM files to be used, and never writes projection data to T3 storage. SQLite may update existing WAL/SHM locking state while a read is active. It does not perform recursive discovery or broad filesystem searches. Use `--db` and temporary fixture homes for development and tests. Do not paste credentials, bearer tokens, private prompts, or unrelated local data into reports.
 
 ## Schema and compatibility policy
 
