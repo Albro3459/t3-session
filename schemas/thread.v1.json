@@ -49,7 +49,21 @@
     "messages": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "activities": { "type": "array", "items": { "$ref": "#/$defs/activity" } },
     "provider": { "$ref": "#/$defs/provider" },
-    "warnings": { "type": "array", "items": { "$ref": "#/$defs/warning" } }
+    "warnings": { "type": "array", "items": { "$ref": "#/$defs/warning" } },
+    "selection": {
+      "description": "Present only for bounded retrieval. Its presence means turns, messages, and activities contain only the selected window rather than the thread's complete history.",
+      "type": "object",
+      "required": ["kind", "turnId", "turnLimit", "turnOffset", "totalTurns", "selectedTurnIds"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["turn-window", "turn"] },
+        "turnId": { "type": ["string", "null"] },
+        "turnLimit": { "type": ["integer", "null"] },
+        "turnOffset": { "type": ["integer", "null"] },
+        "totalTurns": { "type": ["integer", "null"] },
+        "selectedTurnIds": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
   },
   "$defs": {
     "turn": {

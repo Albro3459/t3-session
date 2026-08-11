@@ -7,6 +7,12 @@ export const ACTIVE_THREAD_ID = "8833580e-bef2-4ece-8fde-cbacbc58650f";
 export const DELETED_THREAD_ID = "deleted-thread-0001";
 export const ORPHAN_THREAD_ID = "orphan-thread-0001";
 export const NULL_FIELD_PROJECT_THREAD_ID = "null-field-project-thread-0001";
+export const WINDOW_THREAD_ID = "window-thread-0001";
+export const TIE_THREAD_A_ID = "tie-thread-a";
+export const TIE_THREAD_B_ID = "tie-thread-b";
+export const NULL_UPDATED_THREAD_ID = "null-updated-thread-0001";
+export const DELETED_PROJECT_TWO_THREAD_ID = "deleted-project-two-thread-0001";
+export const PROJECT_TWO_TITLE = "CodeLaunch";
 
 export function createFixtureDatabase() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "t3-session-"));
@@ -89,6 +95,7 @@ export function createFixtureDatabase() {
   );
   project.run("project-1", "Sanitized project", "/tmp/sanitized-workspace");
   project.run("project-null-fields", null, null);
+  project.run("project-2", PROJECT_TWO_TITLE, "/tmp/codelaunch-workspace");
 
   const thread = database.prepare(`
     INSERT INTO projection_threads (
@@ -157,6 +164,81 @@ export function createFixtureDatabase() {
     null,
     null,
   );
+  thread.run(
+    WINDOW_THREAD_ID,
+    "project-2",
+    "Windowed sanitized thread",
+    "feature",
+    "/tmp/codelaunch-worktree",
+    "wturn-3",
+    "2026-02-01T00:00:00.000Z",
+    "2026-02-01T00:03:00.000Z",
+    "2026-02-01T00:02:10.000Z",
+    null,
+    "full-access",
+    "default",
+    null,
+  );
+  thread.run(
+    TIE_THREAD_A_ID,
+    "project-2",
+    "Tie sanitized thread A",
+    null,
+    null,
+    null,
+    "2026-02-02T00:00:00.000Z",
+    "2026-02-02T00:00:00.000Z",
+    null,
+    null,
+    null,
+    null,
+    null,
+  );
+  thread.run(
+    TIE_THREAD_B_ID,
+    "project-2",
+    "Tie sanitized thread B",
+    null,
+    null,
+    null,
+    "2026-02-02T00:00:00.000Z",
+    "2026-02-02T00:00:00.000Z",
+    null,
+    null,
+    null,
+    null,
+    null,
+  );
+  thread.run(
+    NULL_UPDATED_THREAD_ID,
+    "project-2",
+    "Null updated sanitized thread",
+    null,
+    null,
+    null,
+    "2026-02-03T00:00:00.000Z",
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+  );
+  thread.run(
+    DELETED_PROJECT_TWO_THREAD_ID,
+    "project-2",
+    "Deleted CodeLaunch thread",
+    null,
+    null,
+    null,
+    "2026-02-04T00:00:00.000Z",
+    "2026-02-04T00:01:00.000Z",
+    null,
+    "2026-02-04T00:02:00.000Z",
+    null,
+    null,
+    null,
+  );
 
   const turn = database.prepare(`
     INSERT INTO projection_turns (
@@ -198,6 +280,55 @@ export function createFixtureDatabase() {
     null,
     "[]",
   );
+  // Inserted out of chronological order so turn windows cannot rely on row_id.
+  turn.run(
+    WINDOW_THREAD_ID,
+    "wturn-2",
+    "wuser-2",
+    null,
+    null,
+    "wassistant-2",
+    "completed",
+    "2026-02-01T00:01:10.000Z",
+    "2026-02-01T00:01:11.000Z",
+    "2026-02-01T00:01:20.000Z",
+    2,
+    null,
+    null,
+    null,
+  );
+  turn.run(
+    WINDOW_THREAD_ID,
+    "wturn-3",
+    "wuser-3",
+    null,
+    null,
+    null,
+    "streaming",
+    "2026-02-01T00:02:10.000Z",
+    "2026-02-01T00:02:11.000Z",
+    null,
+    3,
+    null,
+    null,
+    null,
+  );
+  turn.run(
+    WINDOW_THREAD_ID,
+    "wturn-1",
+    "wuser-1",
+    null,
+    null,
+    "wassistant-1",
+    "completed",
+    "2026-02-01T00:00:10.000Z",
+    "2026-02-01T00:00:11.000Z",
+    "2026-02-01T00:00:20.000Z",
+    1,
+    null,
+    null,
+    null,
+  );
 
   const message = database.prepare(`
     INSERT INTO projection_thread_messages (
@@ -226,6 +357,31 @@ export function createFixtureDatabase() {
     "2026-01-01T00:01:00.000Z",
     "2026-01-01T00:01:00.000Z",
     '[{"name":"safe.txt"}]',
+  );
+  // Projected user prompts carry a null turn_id and are reachable through pending_message_id.
+  message.run(
+    "wuser-1", WINDOW_THREAD_ID, null, "user", "Windowed question one",
+    0, "2026-02-01T00:00:10.000Z", "2026-02-01T00:00:10.000Z", null,
+  );
+  message.run(
+    "wassistant-1", WINDOW_THREAD_ID, "wturn-1", "assistant", "Windowed answer one",
+    0, "2026-02-01T00:00:20.000Z", "2026-02-01T00:00:20.000Z", null,
+  );
+  message.run(
+    "wuser-2", WINDOW_THREAD_ID, null, "user", "Windowed question two",
+    0, "2026-02-01T00:01:10.000Z", "2026-02-01T00:01:10.000Z", null,
+  );
+  message.run(
+    "wassistant-2", WINDOW_THREAD_ID, "wturn-2", "assistant", "Windowed answer two",
+    0, "2026-02-01T00:01:20.000Z", "2026-02-01T00:01:20.000Z", null,
+  );
+  message.run(
+    "wuser-3", WINDOW_THREAD_ID, null, "user", "Windowed question three",
+    0, "2026-02-01T00:02:10.000Z", "2026-02-01T00:02:10.000Z", null,
+  );
+  message.run(
+    "wextra-3", WINDOW_THREAD_ID, "wturn-3", "assistant", "Windowed streaming answer",
+    1, "2026-02-01T00:02:15.000Z", "2026-02-01T00:02:16.000Z", null,
   );
 
   const activity = database.prepare(`
@@ -256,13 +412,32 @@ export function createFixtureDatabase() {
     "2026-01-01T00:01:00.000Z",
     1,
   );
+  activity.run(
+    "wactivity-1", WINDOW_THREAD_ID, "wturn-1", "info", "tool",
+    "Window activity one", null, "2026-02-01T00:00:15.000Z", 1,
+  );
+  activity.run(
+    "wactivity-2", WINDOW_THREAD_ID, "wturn-2", "info", "tool",
+    "Window activity two", null, "2026-02-01T00:01:15.000Z", 2,
+  );
+  activity.run(
+    "wactivity-3", WINDOW_THREAD_ID, "wturn-3", "info", "tool",
+    "Window activity three", null, "2026-02-01T00:02:12.000Z", 3,
+  );
+  // Not associated with any turn, so no turn window may include it.
+  activity.run(
+    "wactivity-unassociated", WINDOW_THREAD_ID, null, "info", "status",
+    "Unassociated window activity", null, "2026-02-01T00:02:30.000Z", 4,
+  );
 
-  database.prepare(`
+  const session = database.prepare(`
     INSERT INTO projection_thread_sessions (
       thread_id, provider_name, provider_session_id, provider_thread_id,
       provider_instance_id, status, last_error
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(ACTIVE_THREAD_ID, "SanitizedProvider", null, null, "instance-1", "ready", null);
+  `);
+  session.run(ACTIVE_THREAD_ID, "SanitizedProvider", null, null, "instance-1", "ready", null);
+  session.run(WINDOW_THREAD_ID, "SanitizedProvider", null, null, "instance-2", "running", null);
 
   database.close();
   return { directory, databasePath };

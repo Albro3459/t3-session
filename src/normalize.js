@@ -1,4 +1,5 @@
 const SCHEMA_VERSION = "t3-session.thread.v1";
+const LIST_SCHEMA_VERSION = "t3-session.list.v1";
 
 function warningFor(field, raw, error) {
   return {
@@ -159,25 +160,65 @@ function normalizeProvider(row) {
   };
 }
 
-export function normalizeThreadSearchResult(row) {
-  const project = row.project_join_id === null || row.project_join_id === undefined
+function projectFromJoinRow(row) {
+  return row.project_join_id === null || row.project_join_id === undefined
     ? null
     : {
         title: row.project_title ?? null,
         workspaceRoot: row.workspace_root ?? null,
       };
+}
 
+export function normalizeThreadSearchResult(row) {
   return {
     id: row.thread_id,
     projectId: row.project_id ?? null,
     title: row.title ?? null,
-    project,
+    project: projectFromJoinRow(row),
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
   };
 }
 
-export function normalizeThread(rows, { toolVersion = "0.1.0" } = {}) {
+export function normalizeThreadSummary(row) {
+  return {
+    id: row.thread_id,
+    projectId: row.project_id ?? null,
+    title: row.title ?? null,
+    project: projectFromJoinRow(row),
+    branch: row.branch ?? null,
+    worktreePath: row.worktree_path ?? null,
+    createdAt: row.created_at ?? null,
+    updatedAt: row.updated_at ?? null,
+    latestUserMessageAt: row.latest_user_message_at ?? null,
+    latestTurnId: row.latest_turn_id ?? null,
+  };
+}
+
+export function normalizeThreadList(rows, { toolVersion = "0.1.0", options, hasMore = false } = {}) {
+  const threads = rows.map(normalizeThreadSummary);
+
+  return {
+    schemaVersion: LIST_SCHEMA_VERSION,
+    toolVersion,
+    filters: {
+      project: options.project ?? null,
+      since: options.since ?? null,
+      before: options.before ?? null,
+    },
+    ordering: {
+      sortBy: "updatedAt",
+      direction: options.reverse ? "desc" : "asc",
+    },
+    limit: options.limit,
+    offset: options.offset,
+    count: threads.length,
+    hasMore,
+    threads,
+  };
+}
+
+export function normalizeThread(rows, { toolVersion = "0.1.0", selection } = {}) {
   const warnings = [];
   const modelSelection = parseJsonField(
     rows.thread.model_selection_json,
@@ -192,16 +233,31 @@ export function normalizeThread(rows, { toolVersion = "0.1.0" } = {}) {
     addAdapterSpecific(thread, { modelSelectionJson: modelSelection.raw });
   }
 
-  return {
+  const turns = rows.turns.map((row) => normalizeTurn(row, warnings));
+
+  const normalized = {
     schemaVersion: SCHEMA_VERSION,
     toolVersion,
     thread,
-    turns: rows.turns.map((row) => normalizeTurn(row, warnings)),
+    turns,
     messages: rows.messages.map((row) => normalizeMessage(row, warnings)),
     activities: rows.activities.map((row) => normalizeActivity(row, warnings)),
     provider: normalizeProvider(rows.provider),
     warnings,
   };
+
+  if (selection !== null && selection !== undefined) {
+    normalized.selection = {
+      kind: selection.kind,
+      turnId: selection.turnId ?? null,
+      turnLimit: selection.turnLimit ?? null,
+      turnOffset: selection.turnOffset ?? null,
+      totalTurns: selection.totalTurns ?? null,
+      selectedTurnIds: turns.map((turn) => turn.turnId).filter((turnId) => turnId !== null),
+    };
+  }
+
+  return normalized;
 }
 
-export { SCHEMA_VERSION };
+export { SCHEMA_VERSION, LIST_SCHEMA_VERSION };

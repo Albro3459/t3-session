@@ -9,6 +9,7 @@ const SCHEMA_FILES = Object.freeze({
   "thread.v1": "thread.v1.json",
   "error.v1": "error.v1.json",
   "jsonl-record.v1": "jsonl-record.v1.json",
+  "list.v1": "list.v1.json",
 });
 
 export function resolveSchemaPath(name) {

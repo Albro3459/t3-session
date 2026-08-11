@@ -16,6 +16,10 @@ function addField(lines, label, value) {
   lines.push(`${label}: ${displayValue(value)}`);
 }
 
+function sectionHeading(title) {
+  return [title, "-".repeat(title.length)];
+}
+
 function formatMessage(message) {
   const timestamp = message.createdAt || message.updatedAt || "unknown time";
   const role = message.role || "unknown role";
@@ -36,6 +40,7 @@ function formatActivity(activity) {
 }
 
 export function formatThreadHuman(thread) {
+  const bounded = thread.selection != null;
   const lines = ["Thread", "======", ""];
   addField(lines, "ID", thread.thread.id);
   addField(lines, "Title", thread.thread.title);
@@ -60,7 +65,18 @@ export function formatThreadHuman(thread) {
   addField(lines, "Status", thread.provider.status);
   addField(lines, "Last error", thread.provider.lastError);
 
-  lines.push("", "Turns", "-----");
+  if (bounded) {
+    lines.push("", "Selection", "---------");
+    addField(lines, "Kind", thread.selection.kind);
+    addField(lines, "Turn ID", thread.selection.turnId);
+    addField(lines, "Turn limit", thread.selection.turnLimit);
+    addField(lines, "Turn offset", thread.selection.turnOffset);
+    addField(lines, "Total turns", thread.selection.totalTurns);
+    addField(lines, "Selected turns", thread.selection.selectedTurnIds.join(", "));
+    lines.push("Partial history: yes");
+  }
+
+  lines.push("", ...sectionHeading(bounded ? "Turns (partial)" : "Turns"));
   if (thread.turns.length === 0) {
     lines.push("- None");
   } else {
@@ -71,7 +87,7 @@ export function formatThreadHuman(thread) {
     }
   }
 
-  lines.push("", "Messages", "--------");
+  lines.push("", ...sectionHeading(bounded ? "Messages (partial)" : "Messages"));
   if (thread.messages.length === 0) {
     lines.push("- None");
   } else {
@@ -80,7 +96,7 @@ export function formatThreadHuman(thread) {
     }
   }
 
-  lines.push("", "Activities", "----------");
+  lines.push("", ...sectionHeading(bounded ? "Activities (partial)" : "Activities"));
   if (thread.activities.length === 0) {
     lines.push("- None");
   } else {
@@ -126,6 +142,40 @@ export function formatFindHuman(matches, title) {
   return `${lines.join("\n")}\n`;
 }
 
+export function formatListJson(list) {
+  return `${JSON.stringify(list, null, 2)}\n`;
+}
+
+export function formatListHuman(list) {
+  const lines = ["Threads", "=======", ""];
+  addField(lines, "Project", list.filters.project);
+  addField(lines, "Since", list.filters.since);
+  addField(lines, "Before", list.filters.before);
+  lines.push(`Order: ${list.ordering.sortBy} ${list.ordering.direction}`);
+  addField(lines, "Limit", list.limit);
+  addField(lines, "Offset", list.offset);
+  addField(lines, "Returned", list.count);
+  lines.push(`More available: ${list.hasMore ? "yes" : "no"}`, "");
+
+  if (list.threads.length === 0) {
+    lines.push("No matching threads.");
+    return `${lines.join("\n")}\n`;
+  }
+
+  for (const thread of list.threads) {
+    lines.push(
+      `${thread.title || "(untitled)"}`,
+      `  ID: ${thread.id}`,
+      `  Project: ${thread.project?.title || "-"}`,
+      `  Updated: ${thread.updatedAt || "-"}`,
+      `  Created: ${thread.createdAt || "-"}`,
+      "",
+    );
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
 export function formatDoctorJson(report) {
   return `${JSON.stringify(report, null, 2)}\n`;
 }
@@ -139,22 +189,116 @@ function createRecord(type, threadId, data) {
   };
 }
 
+const RECORD_TYPE_RANK = { turn: 0, message: 1, activity: 2 };
+
+function turnEventTimestamp(turn) {
+  return turn.requestedAt ?? turn.startedAt ?? turn.completedAt ?? null;
+}
+
+function messageEventTimestamp(message) {
+  return message.createdAt ?? message.updatedAt ?? null;
+}
+
+function activityEventTimestamp(activity) {
+  return activity.createdAt ?? null;
+}
+
+function buildSortableEntry(type, record) {
+  if (type === "turn") {
+    return {
+      type,
+      record,
+      timestamp: turnEventTimestamp(record),
+      secondary: record.rowId ?? null,
+      identifier: record.turnId ?? String(record.rowId ?? ""),
+    };
+  }
+
+  if (type === "message") {
+    return {
+      type,
+      record,
+      timestamp: messageEventTimestamp(record),
+      secondary: null,
+      identifier: record.messageId ?? "",
+    };
+  }
+
+  return {
+    type,
+    record,
+    timestamp: activityEventTimestamp(record),
+    secondary: record.sequence ?? null,
+    identifier: record.activityId ?? "",
+  };
+}
+
+// Records with no event timestamp sort after every timestamped record; ties
+// are broken by type rank (turn, then message, then activity), then by each
+// type's numeric secondary key (rowId/sequence, nulls last), then by the
+// type's stable identifier string.
+function compareSortableEntries(a, b) {
+  if (a.timestamp === null && b.timestamp !== null) return 1;
+  if (a.timestamp !== null && b.timestamp === null) return -1;
+  if (a.timestamp !== null && b.timestamp !== null && a.timestamp !== b.timestamp) {
+    return a.timestamp < b.timestamp ? -1 : 1;
+  }
+
+  if (RECORD_TYPE_RANK[a.type] !== RECORD_TYPE_RANK[b.type]) {
+    return RECORD_TYPE_RANK[a.type] - RECORD_TYPE_RANK[b.type];
+  }
+
+  if (a.secondary !== b.secondary) {
+    if (a.secondary === null || a.secondary === undefined) return 1;
+    if (b.secondary === null || b.secondary === undefined) return -1;
+    return a.secondary - b.secondary;
+  }
+
+  if (a.identifier < b.identifier) return -1;
+  if (a.identifier > b.identifier) return 1;
+  return 0;
+}
+
 export function jsonlRecordsForThread(thread) {
   const threadId = thread.thread.id;
+  const header = {
+    ...createRecord("thread", threadId, thread.thread),
+    provider: thread.provider,
+    warnings: thread.warnings,
+  };
+
+  const entries = [
+    ...thread.turns.map((turn) => buildSortableEntry("turn", turn)),
+    ...thread.messages.map((message) => buildSortableEntry("message", message)),
+    ...thread.activities.map((activity) => buildSortableEntry("activity", activity)),
+  ];
+  entries.sort(compareSortableEntries);
+
   return [
-    {
-      ...createRecord("thread", threadId, thread.thread),
-      provider: thread.provider,
-      warnings: thread.warnings,
-    },
-    ...thread.turns.map((turn) => createRecord("turn", threadId, turn)),
-    ...thread.messages.map((message) => createRecord("message", threadId, message)),
-    ...thread.activities.map((activity) => createRecord("activity", threadId, activity)),
+    header,
+    ...entries.map((entry) => createRecord(entry.type, threadId, entry.record)),
   ];
 }
 
 export function formatThreadJsonl(thread) {
   return `${jsonlRecordsForThread(thread).map((record) => JSON.stringify(record)).join("\n")}\n`;
+}
+
+export function formatListJsonl(list) {
+  const header = createRecord("list", null, {
+    filters: list.filters,
+    ordering: list.ordering,
+    limit: list.limit,
+    offset: list.offset,
+    count: list.count,
+    hasMore: list.hasMore,
+  });
+  const records = [
+    header,
+    ...list.threads.map((summary) => createRecord("thread", summary.id, summary)),
+  ];
+
+  return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
 }
 
 export function formatRawJsonl(records) {

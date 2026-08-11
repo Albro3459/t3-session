@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned only. This document covers Increment 1 from `TODO/ROADMAP.md`:
+Implemented. This document covers Increment 1 from `TODO/ROADMAP.md`:
 
 - listing threads;
 - filtering and pagination;
@@ -10,7 +10,24 @@ Planned only. This document covers Increment 1 from `TODO/ROADMAP.md`:
 - chronological normalized JSONL output;
 - tests and Skill examples.
 
-Do not implement live tailing or subagent hierarchy in this increment.
+Live tailing and subagent hierarchy were not implemented and remain deferred to Increments 2 and 3.
+
+The sections below are the original plan and are kept as written. Where the plan left a contract decision open, the resolution is recorded in "Decisions made during implementation".
+
+## Decisions made during implementation
+
+- **Partial-retrieval marker.** `selection` was added to `thread.v1` as an optional property and is omitted entirely for full retrieval, so unbounded `get` output is unchanged and existing consumers are unaffected. No new thread schema version was needed.
+- **Null-timestamp rule.** Records and threads with a null ordering timestamp sort last, in both the default and reversed order, everywhere the rule applies: list ordering, turn-window selection, and normalized JSONL. Threads with a null `updated_at` are excluded entirely when `--since` or `--before` is used, because a null timestamp cannot satisfy a bound.
+- **JSONL tie-breaking.** Primary key is the event timestamp compared as a string, since stored values are ISO-8601 UTC. Ties break by record type (turn, then message, then activity), then by a numeric secondary key (`rowId` for turns, `sequence` for activities), then by the type's stable identifier.
+- **Project filter.** Exact case-insensitive match on the trimmed project title, not a substring search. `find --title` remains the substring search.
+- **Limits.** `list` defaults to 50. `--turn-limit` defaults to 1 when only `--turn-offset` is supplied. No maximum cap was added, because full `get` is already unbounded and an artificial ceiling would have been inconsistent.
+- **`find` ordering.** Changed from newest-first (`updated_at` descending) to oldest-first chronological with a deterministic `thread_id` tie-breaker, so `--reverse` means the same thing for `find` and `list`. The result shape is unchanged; `list` is the envelope-based paginated command. Recorded in the README as a pre-1.0 correction alongside the JSONL ordering change.
+- **Validation.** All option validation lives in `src/query-options.js` and is shared by the CLI and the Node API, so a library caller cannot bypass it. Validation runs before SQLite is opened.
+- **`list --format jsonl`.** Emits a `list` header record carrying the envelope metadata, followed by one `thread` record per summary. `"list"` was added to the `jsonl-record.v1` `recordType` enum as an additive change.
+
+## Known limitation accepted for this increment
+
+`retrieveThreadWindowRows` builds `IN (...)` clauses from the selected turn IDs, so a window of roughly ten thousand or more turns would exceed SQLite's variable limit and surface a `DATABASE_UNAVAILABLE` error rather than data. This was judged not worth a chunked-query fallback: `--turn-limit` defaults to 1 and the full retrieval path does not use this query.
 
 ## Objective
 

@@ -17,6 +17,9 @@ import {
   formatDoctorJson,
   formatFindHuman,
   formatFindJson,
+  formatListHuman,
+  formatListJson,
+  formatListJsonl,
   formatRawJsonl,
   formatThreadHuman,
   formatThreadJson,
@@ -25,9 +28,42 @@ import {
 
 export const VERSION = packageMetadata.version;
 
-const COMMANDS = ["get", "find", "doctor", "schema", "install"];
-const STORAGE_COMMANDS = new Set(["get", "find", "doctor"]);
+const COMMANDS = ["list", "get", "find", "doctor", "schema", "install"];
+const STORAGE_COMMANDS = new Set(["list", "get", "find", "doctor"]);
 const FORMATS = new Set(["human", "json", "jsonl"]);
+
+const LIST_FILTER_OPTIONS = [
+  { key: "project", option: "--project", kind: "value" },
+  { key: "since", option: "--since", kind: "value" },
+  { key: "before", option: "--before", kind: "value" },
+  { key: "limit", option: "--limit", kind: "value" },
+  { key: "offset", option: "--offset", kind: "value" },
+];
+const LIST_ONLY_OPTIONS = [
+  ...LIST_FILTER_OPTIONS,
+  { key: "reverse", option: "--reverse", kind: "flag" },
+];
+const TURN_OPTIONS = [
+  { key: "lastTurn", option: "--last-turn", kind: "flag" },
+  { key: "turn", option: "--turn", kind: "value" },
+  { key: "turnLimit", option: "--turn-limit", kind: "value" },
+  { key: "turnOffset", option: "--turn-offset", kind: "value" },
+];
+
+function isOptionSet(options, def) {
+  return def.kind === "flag" ? options[def.key] === true : options[def.key] !== undefined;
+}
+
+function rejectOptions(options, command, optionDefs) {
+  for (const def of optionDefs) {
+    if (isOptionSet(options, def)) {
+      throw new InvalidArgumentsError(`${def.option} is not supported by ${command}.`, {
+        command,
+        option: def.option,
+      });
+    }
+  }
+}
 
 function writeLine(stream, value) {
   stream.write(`${value}\n`);
@@ -50,6 +86,16 @@ export function parseCliArgs(argv = []) {
     db: undefined,
     format: undefined,
     title: undefined,
+    project: undefined,
+    since: undefined,
+    before: undefined,
+    limit: undefined,
+    offset: undefined,
+    reverse: false,
+    lastTurn: false,
+    turn: undefined,
+    turnLimit: undefined,
+    turnOffset: undefined,
     rawJsonl: false,
     help: false,
     version: false,
@@ -88,6 +134,64 @@ export function parseCliArgs(argv = []) {
 
     if (value === "--title") {
       result.title = requireOptionValue(argv, index, "--title");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--project") {
+      result.project = requireOptionValue(argv, index, "--project");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--since") {
+      result.since = requireOptionValue(argv, index, "--since");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--before") {
+      result.before = requireOptionValue(argv, index, "--before");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--limit") {
+      result.limit = requireOptionValue(argv, index, "--limit");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--offset") {
+      result.offset = requireOptionValue(argv, index, "--offset");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--reverse") {
+      result.reverse = true;
+      continue;
+    }
+
+    if (value === "--last-turn") {
+      result.lastTurn = true;
+      continue;
+    }
+
+    if (value === "--turn") {
+      result.turn = requireOptionValue(argv, index, "--turn");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--turn-limit") {
+      result.turnLimit = requireOptionValue(argv, index, "--turn-limit");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--turn-offset") {
+      result.turnOffset = requireOptionValue(argv, index, "--turn-offset");
       index += 1;
       continue;
     }
@@ -134,15 +238,29 @@ export function formatHelp() {
     "  --format <format>       Use human, json, or jsonl output",
     "  -h, --help              Show this help",
     "  -v, --version           Show the package version",
+    "  list and find default to oldest-first ordering; pass --reverse for newest-first.",
     "",
     "Commands:",
+    "  list                    List recent threads (metadata only)",
+    "    --project <text>       Match a project title, case-insensitively",
+    "    --since <timestamp>    Include threads updated at or after an ISO-8601 timestamp",
+    "    --before <timestamp>   Include threads updated before an ISO-8601 timestamp",
+    "    --limit <n>            Maximum threads to return (default 50)",
+    "    --offset <n>           Skip matching threads before applying --limit",
+    "    --reverse              Sort newest-first instead of oldest-first",
+    "    --format human|json|jsonl",
     "  get <thread-id>         Retrieve one thread",
     "    --format human        Human-readable output (default)",
     "    --format json         Complete normalized thread.v1 JSON",
     "    --format jsonl        One normalized record per line",
     "    --raw-jsonl            Emit parsed raw provider events as JSONL",
+    "    --last-turn            Retrieve only the newest turn and its records",
+    "    --turn <turn-id>       Retrieve one exact turn and its records",
+    "    --turn-limit <n>       Retrieve a bounded window of turns from the newest side",
+    "    --turn-offset <n>      Skip turns from the newest side before --turn-limit",
     "  find --title <text>     Find threads by title",
     "    --format json          Emit normalized search results",
+    "    --reverse              Sort newest-first instead of oldest-first",
     "  doctor                  Check the local T3 installation",
     "    --format json          Emit machine-readable diagnostics",
     "  schema <name>           Print a bundled schema",
@@ -154,6 +272,62 @@ export function formatHelp() {
   ].join("\n");
 }
 
+async function handleList(options) {
+  const args = options.args || [];
+  if (args.length !== 0) {
+    throw new InvalidArgumentsError("list does not accept positional arguments.", {
+      command: "list",
+      expected: "list [options]",
+    });
+  }
+
+  if (options.title !== undefined) {
+    throw new InvalidArgumentsError("--title is only supported by find.", {
+      command: "list",
+      option: "--title",
+    });
+  }
+
+  if (options.rawJsonl) {
+    throw new InvalidArgumentsError("--raw-jsonl is only supported by get.", {
+      command: "list",
+      option: "--raw-jsonl",
+    });
+  }
+
+  rejectOptions(options, "list", TURN_OPTIONS);
+
+  const format = options.format || "human";
+  if (!FORMATS.has(format)) {
+    throw new InvalidArgumentsError(`Unsupported output format: ${format}.`, {
+      command: "list",
+      format,
+      supportedFormats: [...FORMATS],
+    });
+  }
+
+  const config = options.config || resolveConfig(options);
+  const client = await createT3SessionClient({ home: config.home, db: config.stateDb });
+  const list = await client.listThreads({
+    project: options.project,
+    since: options.since,
+    before: options.before,
+    limit: options.limit,
+    offset: options.offset,
+    reverse: options.reverse,
+  });
+
+  if (format === "json") {
+    return { output: formatListJson(list) };
+  }
+
+  if (format === "jsonl") {
+    return { output: formatListJsonl(list) };
+  }
+
+  return { output: formatListHuman(list) };
+}
+
 async function handleGet(options) {
   const args = options.args || [];
   if (options.title !== undefined) {
@@ -162,6 +336,8 @@ async function handleGet(options) {
       option: "--title",
     });
   }
+
+  rejectOptions(options, "get", LIST_ONLY_OPTIONS);
 
   const unknownOption = args.find((argument) => argument.startsWith("-"));
   if (unknownOption) {
@@ -195,6 +371,16 @@ async function handleGet(options) {
     });
   }
 
+  if (options.rawJsonl) {
+    const turnOptionUsed = TURN_OPTIONS.find((def) => isOptionSet(options, def));
+    if (turnOptionUsed) {
+      throw new InvalidArgumentsError(
+        "--raw-jsonl cannot be combined with turn selection options because raw provider output is not a projection window.",
+        { command: "get", option: turnOptionUsed.option },
+      );
+    }
+  }
+
   const config = options.config || resolveConfig(options);
   const client = await createT3SessionClient({ home: config.home, db: config.stateDb });
   if (options.rawJsonl) {
@@ -209,7 +395,12 @@ async function handleGet(options) {
     };
   }
 
-  const thread = await client.getThread(args[0]);
+  const thread = await client.getThread(args[0], {
+    lastTurn: options.lastTurn,
+    turnId: options.turn,
+    turnLimit: options.turnLimit,
+    turnOffset: options.turnOffset,
+  });
 
   if (format === "json") {
     return { output: formatThreadJson(thread) };
@@ -245,6 +436,8 @@ async function handleFind(options) {
     });
   }
 
+  rejectOptions(options, "find", [...LIST_FILTER_OPTIONS, ...TURN_OPTIONS]);
+
   const format = options.format || "human";
   if (format !== "human" && format !== "json") {
     throw new InvalidArgumentsError(`Unsupported output format for find: ${format}.`, {
@@ -256,7 +449,7 @@ async function handleFind(options) {
 
   const config = options.config || resolveConfig(options);
   const client = await createT3SessionClient({ home: config.home, db: config.stateDb });
-  const matches = await client.findThreads({ title: options.title });
+  const matches = await client.findThreads({ title: options.title, reverse: options.reverse });
 
   return {
     output: format === "json"
@@ -287,6 +480,8 @@ async function handleDoctor(options) {
       option: "--raw-jsonl",
     });
   }
+
+  rejectOptions(options, "doctor", [...LIST_ONLY_OPTIONS, ...TURN_OPTIONS]);
 
   const format = options.format || "human";
   if (format !== "human" && format !== "json") {
@@ -348,9 +543,11 @@ async function handleSchema(options) {
   if (options.args.length !== 1 || options.args[0].startsWith("-")) {
     throw new InvalidArgumentsError("schema requires exactly one schema name.", {
       command: "schema",
-      expected: "schema <thread.v1|error.v1|jsonl-record.v1>",
+      expected: "schema <thread.v1|error.v1|jsonl-record.v1|list.v1>",
     });
   }
+
+  rejectOptions(options, "schema", [...LIST_ONLY_OPTIONS, ...TURN_OPTIONS]);
 
   return { output: formatBundledSchema(options.args[0]) };
 }
@@ -361,6 +558,8 @@ async function handleInstall(options) {
       command: "install",
     });
   }
+
+  rejectOptions(options, "install", [...LIST_ONLY_OPTIONS, ...TURN_OPTIONS]);
 
   const installOptions = parseInstallOptions(options.args);
   const result = installBundledSkill(installOptions.agent, installOptions);
@@ -383,6 +582,7 @@ async function notImplemented(options) {
 }
 
 const commandHandlers = new Map(COMMANDS.map((command) => [command, notImplemented]));
+commandHandlers.set("list", handleList);
 commandHandlers.set("get", handleGet);
 commandHandlers.set("find", handleFind);
 commandHandlers.set("doctor", handleDoctor);

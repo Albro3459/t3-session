@@ -6,6 +6,7 @@ import {
   SchemaUnavailableError,
   ThreadNotFoundError,
 } from "./errors.js";
+import { normalizeListOptions } from "./query-options.js";
 
 export const READ_TIMEOUT_MS = 250;
 
@@ -114,23 +115,105 @@ const PROVIDER_QUERY = `
   WHERE thread_id = ?
 `;
 
-const FIND_THREADS_QUERY = `
-  SELECT
-    t.thread_id,
-    t.project_id,
-    t.title,
-    t.created_at,
-    t.updated_at,
-    p.project_id AS project_join_id,
-    p.title AS project_title,
-    p.workspace_root
-  FROM projection_threads AS t
-  LEFT JOIN projection_projects AS p
-    ON p.project_id = t.project_id
-  WHERE t.deleted_at IS NULL
-    AND t.title COLLATE NOCASE LIKE '%' || ? || '%' ESCAPE '\\'
-  ORDER BY t.updated_at DESC
+// Turns without a requested_at/started_at/completed_at value sort last in both directions,
+// matching the null-updated_at rule used for thread ordering.
+export const TURN_ORDER_KEY = "COALESCE(requested_at, started_at, completed_at)";
+
+const TURN_BY_ID_QUERY = `
+  SELECT *
+  FROM projection_turns
+  WHERE thread_id = ? AND turn_id = ?
+  ORDER BY row_id
 `;
+
+const TURN_COUNT_QUERY = `
+  SELECT COUNT(*) AS count
+  FROM projection_turns
+  WHERE thread_id = ?
+`;
+
+function buildTurnWindowQuery() {
+  return `
+    SELECT * FROM (
+      SELECT *
+      FROM projection_turns
+      WHERE thread_id = ?
+      ORDER BY (${TURN_ORDER_KEY} IS NULL) ASC, ${TURN_ORDER_KEY} DESC, row_id DESC
+      LIMIT ? OFFSET ?
+    )
+    ORDER BY (${TURN_ORDER_KEY} IS NULL) ASC, ${TURN_ORDER_KEY} ASC, row_id ASC
+  `;
+}
+
+export function buildFindThreadsQuery(reverse) {
+  const direction = reverse ? "DESC" : "ASC";
+  return `
+    SELECT
+      t.thread_id,
+      t.project_id,
+      t.title,
+      t.created_at,
+      t.updated_at,
+      p.project_id AS project_join_id,
+      p.title AS project_title,
+      p.workspace_root
+    FROM projection_threads AS t
+    LEFT JOIN projection_projects AS p
+      ON p.project_id = t.project_id
+    WHERE t.deleted_at IS NULL
+      AND t.title COLLATE NOCASE LIKE '%' || ? || '%' ESCAPE '\\'
+    ORDER BY (t.updated_at IS NULL) ASC, t.updated_at ${direction}, t.thread_id ${direction}
+  `;
+}
+
+export function buildListThreadsQuery(options) {
+  const direction = options.reverse ? "DESC" : "ASC";
+  const clauses = ["t.deleted_at IS NULL"];
+  const parameters = [];
+
+  if (options.project !== null) {
+    clauses.push("p.title COLLATE NOCASE = ?");
+    parameters.push(options.project);
+  }
+
+  if (options.since !== null) {
+    clauses.push("t.updated_at >= ?");
+    parameters.push(options.since);
+  }
+
+  if (options.before !== null) {
+    clauses.push("t.updated_at < ?");
+    parameters.push(options.before);
+  }
+
+  const sql = `
+    SELECT
+      t.thread_id,
+      t.project_id,
+      t.title,
+      t.branch,
+      t.worktree_path,
+      t.latest_turn_id,
+      t.created_at,
+      t.updated_at,
+      t.latest_user_message_at,
+      p.project_id AS project_join_id,
+      p.title AS project_title,
+      p.workspace_root
+    FROM projection_threads AS t
+    LEFT JOIN projection_projects AS p
+      ON p.project_id = t.project_id
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY (t.updated_at IS NULL) ASC, t.updated_at ${direction}, t.thread_id ${direction}
+    LIMIT ? OFFSET ?
+  `;
+
+  parameters.push(options.limit + 1, options.offset);
+
+  return { sql, parameters };
+}
+
+const FIND_THREADS_QUERY = buildFindThreadsQuery(false);
 
 export const SQL = Object.freeze({
   THREAD_QUERY,
@@ -139,6 +222,14 @@ export const SQL = Object.freeze({
   TURNS_QUERY,
   PROVIDER_QUERY,
   FIND_THREADS_QUERY,
+  LIST_THREADS_QUERY: buildListThreadsQuery({
+    project: null,
+    since: null,
+    before: null,
+    limit: 50,
+    offset: 0,
+    reverse: false,
+  }).sql,
 });
 
 function detailsFor(path, operation) {
@@ -286,14 +377,124 @@ export function retrieveThreadRows(database, threadId) {
   };
 }
 
-export function retrieveThreadSearchRows(database, title) {
+export function retrieveThreadSearchRows(database, title, { reverse = false } = {}) {
   const titleFilter = normalizeTitleFilter(title);
+  const sql = reverse ? buildFindThreadsQuery(true) : FIND_THREADS_QUERY;
   return queryAll(
     database,
-    FIND_THREADS_QUERY,
+    sql,
     [escapeLikeLiteral(titleFilter)],
     "thread search",
   );
+}
+
+export function retrieveThreadListRows(database, listOptions) {
+  const options = normalizeListOptions(listOptions);
+  const { sql, parameters } = buildListThreadsQuery(options);
+  const fetched = queryAll(database, sql, parameters, "thread list");
+  return {
+    rows: fetched.slice(0, options.limit),
+    hasMore: fetched.length > options.limit,
+  };
+}
+
+function uniqueIds(values) {
+  return [...new Set(values.filter((value) => value !== null && value !== undefined))];
+}
+
+export function retrieveThreadWindowRows(database, threadId, selection) {
+  const thread = queryAll(database, THREAD_QUERY, threadId, "thread")[0];
+  if (!thread) {
+    throw new ThreadNotFoundError(threadId);
+  }
+
+  const totalTurns = queryAll(database, TURN_COUNT_QUERY, threadId, "turn count")[0].count;
+
+  const turns = selection.kind === "turn"
+    ? queryAll(database, TURN_BY_ID_QUERY, [threadId, selection.turnId], "turns")
+    : queryAll(
+        database,
+        buildTurnWindowQuery(),
+        [threadId, selection.turnLimit, selection.turnOffset],
+        "turns",
+      );
+
+  const turnIds = uniqueIds(turns.map((turn) => turn.turn_id));
+  const messageIds = uniqueIds(turns.flatMap((turn) => [turn.pending_message_id, turn.assistant_message_id]));
+
+  const messages = [];
+  let activities = [];
+
+  if (turnIds.length > 0 || messageIds.length > 0) {
+    const messageClauses = [];
+    const messageParameters = [threadId];
+    if (turnIds.length > 0) {
+      messageClauses.push(`turn_id IN (${turnIds.map(() => "?").join(", ")})`);
+      messageParameters.push(...turnIds);
+    }
+    if (messageIds.length > 0) {
+      messageClauses.push(`message_id IN (${messageIds.map(() => "?").join(", ")})`);
+      messageParameters.push(...messageIds);
+    }
+
+    const messagesSql = `
+      SELECT
+        message_id,
+        thread_id,
+        turn_id,
+        role,
+        text,
+        is_streaming,
+        created_at,
+        updated_at,
+        attachments_json
+      FROM projection_thread_messages
+      WHERE thread_id = ? AND (${messageClauses.join(" OR ")})
+      ORDER BY (created_at IS NULL) ASC, created_at, message_id
+    `;
+    const fetchedMessages = queryAll(database, messagesSql, messageParameters, "messages");
+    const seenMessageIds = new Set();
+    for (const row of fetchedMessages) {
+      if (!seenMessageIds.has(row.message_id)) {
+        seenMessageIds.add(row.message_id);
+        messages.push(row);
+      }
+    }
+
+    if (turnIds.length > 0) {
+      const activitiesSql = `
+        SELECT
+          activity_id,
+          thread_id,
+          turn_id,
+          tone,
+          kind,
+          summary,
+          payload_json,
+          created_at,
+          sequence
+        FROM projection_thread_activities
+        WHERE thread_id = ? AND turn_id IN (${turnIds.map(() => "?").join(", ")})
+        ORDER BY (created_at IS NULL) ASC, created_at, activity_id
+      `;
+      activities = queryAll(database, activitiesSql, [threadId, ...turnIds], "activities");
+    }
+  }
+
+  return {
+    thread,
+    turns,
+    messages,
+    activities,
+    provider: queryAll(database, PROVIDER_QUERY, threadId, "provider")[0] || null,
+    selection: {
+      kind: selection.kind,
+      turnId: selection.turnId ?? null,
+      turnLimit: selection.turnLimit ?? null,
+      turnOffset: selection.turnOffset ?? null,
+      totalTurns,
+    },
+  };
 }
 
 export function countProjectionRows(database) {
@@ -327,7 +528,7 @@ export function readThreadFromDatabase(databasePath, threadId) {
   }
 }
 
-export function findThreadsFromDatabase(databasePath, title) {
+export function findThreadsFromDatabase(databasePath, title, { reverse = false } = {}) {
   const titleFilter = normalizeTitleFilter(title);
   const database = openReadonlyDatabase(databasePath);
   let transactionStarted = false;
@@ -335,7 +536,44 @@ export function findThreadsFromDatabase(databasePath, title) {
     database.exec("BEGIN DEFERRED");
     transactionStarted = true;
     validateRequiredTables(database);
-    return retrieveThreadSearchRows(database, titleFilter);
+    return retrieveThreadSearchRows(database, titleFilter, { reverse });
+  } finally {
+    if (transactionStarted) {
+      database.exec("ROLLBACK");
+    }
+    database.close();
+  }
+}
+
+export function listThreadRowsFromDatabase(databasePath, options) {
+  const listOptions = normalizeListOptions(options);
+  const database = openReadonlyDatabase(databasePath);
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN DEFERRED");
+    transactionStarted = true;
+    validateRequiredTables(database);
+    return retrieveThreadListRows(database, listOptions);
+  } finally {
+    if (transactionStarted) {
+      database.exec("ROLLBACK");
+    }
+    database.close();
+  }
+}
+
+export function readThreadWindowFromDatabase(databasePath, threadId, selection) {
+  if (selection === null || selection === undefined) {
+    throw new InvalidArgumentsError("A turn selection is required.", { field: "selection" });
+  }
+
+  const database = openReadonlyDatabase(databasePath);
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN DEFERRED");
+    transactionStarted = true;
+    validateRequiredTables(database);
+    return retrieveThreadWindowRows(database, threadId, selection);
   } finally {
     if (transactionStarted) {
       database.exec("ROLLBACK");
