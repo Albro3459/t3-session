@@ -1,6 +1,47 @@
 const SCHEMA_VERSION = "t3-session.thread.v1";
 const LIST_SCHEMA_VERSION = "t3-session.list.v1";
 
+// A turn state outside this set is treated as non-terminal, because reporting an
+// unfinished thread as settled is the more damaging error.
+export const TERMINAL_TURN_STATES = Object.freeze([
+  "aborted",
+  "canceled",
+  "cancelled",
+  "completed",
+  "errored",
+  "failed",
+]);
+
+export const ACTIVE_PROVIDER_STATUSES = Object.freeze([
+  "active",
+  "busy",
+  "running",
+  "streaming",
+]);
+
+export const LIVE_STATE_REASONS = Object.freeze([
+  "provider-active",
+  "streaming-message",
+  "turn-not-terminal",
+]);
+
+const TERMINAL_TURN_STATE_SET = new Set(TERMINAL_TURN_STATES);
+const ACTIVE_PROVIDER_STATUS_SET = new Set(ACTIVE_PROVIDER_STATUSES);
+
+function normalizeStateToken(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : null;
+}
+
+export function isTerminalTurnState(state) {
+  const token = normalizeStateToken(state);
+  return token !== null && TERMINAL_TURN_STATE_SET.has(token);
+}
+
+export function isActiveProviderStatus(status) {
+  const token = normalizeStateToken(status);
+  return token !== null && ACTIVE_PROVIDER_STATUS_SET.has(token);
+}
+
 function warningFor(field, raw, error) {
   return {
     code: "MALFORMED_JSON",
@@ -195,6 +236,41 @@ export function normalizeThreadSummary(row) {
   };
 }
 
+// Live state describes the thread, not the retrieval window, so it is derived from a
+// dedicated read rather than from whichever rows a bounded window happened to select.
+// Recency of updated_at is deliberately not a signal.
+export function normalizeLiveState(rows, { observedAt } = {}) {
+  const session = rows?.session ?? null;
+  const latestTurn = rows?.latestTurn ?? null;
+  const streamingMessageCount = rows?.streamingMessageCount ?? 0;
+  const providerStatus = session?.status ?? null;
+  const reasons = [];
+
+  if (latestTurn !== null && !isTerminalTurnState(latestTurn.state)) {
+    reasons.push("turn-not-terminal");
+  }
+  if (streamingMessageCount > 0) {
+    reasons.push("streaming-message");
+  }
+  if (isActiveProviderStatus(providerStatus)) {
+    reasons.push("provider-active");
+  }
+
+  const sortedReasons = [...new Set(reasons)].sort();
+  const hasSignal = session !== null || latestTurn !== null;
+
+  return {
+    status: sortedReasons.length > 0 ? "active" : hasSignal ? "idle" : "unknown",
+    complete: sortedReasons.length === 0,
+    observedAt: observedAt ?? new Date().toISOString(),
+    providerStatus,
+    latestTurnId: latestTurn?.turn_id ?? null,
+    latestTurnState: latestTurn?.state ?? null,
+    streamingMessageCount,
+    reasons: sortedReasons,
+  };
+}
+
 export function normalizeThreadList(rows, { toolVersion = "0.1.0", options, hasMore = false } = {}) {
   const threads = rows.map(normalizeThreadSummary);
 
@@ -218,7 +294,7 @@ export function normalizeThreadList(rows, { toolVersion = "0.1.0", options, hasM
   };
 }
 
-export function normalizeThread(rows, { toolVersion = "0.1.0", selection } = {}) {
+export function normalizeThread(rows, { toolVersion = "0.1.0", selection, observedAt } = {}) {
   const warnings = [];
   const modelSelection = parseJsonField(
     rows.thread.model_selection_json,
@@ -243,6 +319,7 @@ export function normalizeThread(rows, { toolVersion = "0.1.0", selection } = {})
     messages: rows.messages.map((row) => normalizeMessage(row, warnings)),
     activities: rows.activities.map((row) => normalizeActivity(row, warnings)),
     provider: normalizeProvider(rows.provider),
+    liveState: normalizeLiveState(rows.liveState, { observedAt }),
     warnings,
   };
 

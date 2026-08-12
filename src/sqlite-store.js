@@ -145,6 +145,35 @@ function buildTurnWindowQuery() {
   `;
 }
 
+const LIVE_STATE_SESSION_QUERY = `
+  SELECT status
+  FROM projection_thread_sessions
+  WHERE thread_id = ?
+`;
+
+const LIVE_STATE_TURN_BY_ID_QUERY = `
+  SELECT turn_id, state
+  FROM projection_turns
+  WHERE thread_id = ? AND turn_id = ?
+  ORDER BY row_id DESC
+  LIMIT 1
+`;
+
+const LIVE_STATE_NEWEST_TURN_QUERY = `
+  SELECT turn_id, state
+  FROM projection_turns
+  WHERE thread_id = ?
+  ORDER BY (${TURN_ORDER_KEY} IS NULL) ASC, ${TURN_ORDER_KEY} DESC, row_id DESC
+  LIMIT 1
+`;
+
+// Matches the truthiness rule normalizeBoolean applies to is_streaming.
+const STREAMING_MESSAGE_COUNT_QUERY = `
+  SELECT COUNT(*) AS count
+  FROM projection_thread_messages
+  WHERE thread_id = ? AND is_streaming IN (1, '1', 'true')
+`;
+
 export function buildFindThreadsQuery(reverse) {
   const direction = reverse ? "DESC" : "ASC";
   return `
@@ -362,6 +391,42 @@ function normalizeTitleFilter(title) {
   return trimmed;
 }
 
+// Resolves the thread's latest turn through latest_turn_id, falling back to the newest
+// turn by the shared turn ordering key when that pointer is null or does not resolve.
+export function retrieveLiveStateRows(database, threadId, latestTurnId = null) {
+  const session = queryAll(database, LIVE_STATE_SESSION_QUERY, threadId, "live state session")[0]
+    || null;
+
+  let latestTurn = null;
+  if (latestTurnId !== null && latestTurnId !== undefined) {
+    latestTurn = queryAll(
+      database,
+      LIVE_STATE_TURN_BY_ID_QUERY,
+      [threadId, latestTurnId],
+      "live state turn",
+    )[0] || null;
+  }
+  if (latestTurn === null) {
+    latestTurn = queryAll(
+      database,
+      LIVE_STATE_NEWEST_TURN_QUERY,
+      threadId,
+      "live state turn",
+    )[0] || null;
+  }
+
+  return {
+    session,
+    latestTurn,
+    streamingMessageCount: queryAll(
+      database,
+      STREAMING_MESSAGE_COUNT_QUERY,
+      threadId,
+      "streaming message count",
+    )[0].count,
+  };
+}
+
 export function retrieveThreadRows(database, threadId) {
   const thread = queryAll(database, THREAD_QUERY, threadId, "thread")[0];
   if (!thread) {
@@ -374,6 +439,7 @@ export function retrieveThreadRows(database, threadId) {
     messages: queryAll(database, MESSAGES_QUERY, threadId, "messages"),
     activities: queryAll(database, ACTIVITIES_QUERY, threadId, "activities"),
     provider: queryAll(database, PROVIDER_QUERY, threadId, "provider")[0] || null,
+    liveState: retrieveLiveStateRows(database, threadId, thread.latest_turn_id),
   };
 }
 
@@ -487,6 +553,7 @@ export function retrieveThreadWindowRows(database, threadId, selection) {
     messages,
     activities,
     provider: queryAll(database, PROVIDER_QUERY, threadId, "provider")[0] || null,
+    liveState: retrieveLiveStateRows(database, threadId, thread.latest_turn_id),
     selection: {
       kind: selection.kind,
       turnId: selection.turnId ?? null,
@@ -560,6 +627,15 @@ export function listThreadRowsFromDatabase(databasePath, options) {
     }
     database.close();
   }
+}
+
+// One tail cycle: the same row shape the full and windowed reads return, so a tail and a
+// get normalize identically. Each call opens, reads in a deferred transaction, and closes,
+// because a long-lived snapshot would never observe another process's WAL commits.
+export function readThreadCycleFromDatabase(databasePath, threadId, selection = null) {
+  return selection === null || selection === undefined
+    ? readThreadFromDatabase(databasePath, threadId)
+    : readThreadWindowFromDatabase(databasePath, threadId, selection);
 }
 
 export function readThreadWindowFromDatabase(databasePath, threadId, selection) {

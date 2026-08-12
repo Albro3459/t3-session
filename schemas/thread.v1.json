@@ -50,6 +50,38 @@
     "activities": { "type": "array", "items": { "$ref": "#/$defs/activity" } },
     "provider": { "$ref": "#/$defs/provider" },
     "warnings": { "type": "array", "items": { "$ref": "#/$defs/warning" } },
+    "liveState": {
+      "description": "Always present on retrieved threads. Describes the thread, not the retrieval window: a bounded read reports the same live state as a full read of the same thread at the same moment. Derived from projected signals only, never from timestamp recency.",
+      "type": "object",
+      "required": [
+        "status",
+        "complete",
+        "observedAt",
+        "providerStatus",
+        "latestTurnId",
+        "latestTurnState",
+        "streamingMessageCount",
+        "reasons"
+      ],
+      "properties": {
+        "status": { "type": "string", "enum": ["active", "idle", "unknown"] },
+        "complete": { "type": "boolean" },
+        "observedAt": { "type": "string" },
+        "providerStatus": { "type": ["string", "null"] },
+        "latestTurnId": { "type": ["string", "null"] },
+        "latestTurnState": { "type": ["string", "null"] },
+        "streamingMessageCount": { "type": "integer" },
+        "reasons": {
+          "description": "Sorted, deduplicated codes explaining why complete is false. Empty when complete is true.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["provider-active", "streaming-message", "turn-not-terminal"]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "selection": {
       "description": "Present only for bounded retrieval. Its presence means turns, messages, and activities contain only the selected window rather than the thread's complete history.",
       "type": "object",

@@ -2,6 +2,11 @@ import { InvalidArgumentsError } from "./errors.js";
 
 export const DEFAULT_LIST_LIMIT = 50;
 export const DEFAULT_TURN_LIMIT = 1;
+export const DEFAULT_TAIL_INTERVAL_MS = 1000;
+// A tighter poll offers nothing against a projection that updates per turn, and an
+// unbounded one is a foot-gun.
+export const MIN_TAIL_INTERVAL_MS = 100;
+export const MAX_TAIL_INTERVAL_MS = 60000;
 
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})?)?$/u;
 const DIGITS = /^\d+$/u;
@@ -78,6 +83,58 @@ export function normalizeListOptions(options = {}) {
     limit: normalizeCount(options.limit, "limit", DEFAULT_LIST_LIMIT),
     offset: normalizeCount(options.offset, "offset", 0),
     reverse: normalizeFlag(options.reverse, "reverse"),
+  });
+}
+
+function isUnset(value) {
+  return value === undefined || value === null || value === "";
+}
+
+function normalizeBoundedCount(value, field, { min, max = null }) {
+  if (isUnset(value)) {
+    return null;
+  }
+
+  const count = normalizeCount(value, field, null);
+  if (count < min || (max !== null && count > max)) {
+    throw new InvalidArgumentsError(
+      max === null
+        ? `${field} must be an integer of at least ${min}.`
+        : `${field} must be an integer between ${min} and ${max}.`,
+      { field, value },
+    );
+  }
+
+  return count;
+}
+
+export function normalizeTailOptions(options = {}) {
+  const once = normalizeFlag(options.once, "once");
+  const maxCycles = normalizeBoundedCount(options.maxCycles, "maxCycles", { min: 1 });
+  const timeoutMs = normalizeBoundedCount(options.timeoutMs, "timeoutMs", { min: 1 });
+
+  if (once && (!isUnset(options.intervalMs) || maxCycles !== null || timeoutMs !== null)) {
+    throw new InvalidArgumentsError(
+      "once cannot be combined with intervalMs, maxCycles, or timeoutMs.",
+      { field: "once" },
+    );
+  }
+
+  const intervalMs = isUnset(options.intervalMs)
+    ? DEFAULT_TAIL_INTERVAL_MS
+    : normalizeBoundedCount(options.intervalMs, "intervalMs", {
+        min: MIN_TAIL_INTERVAL_MS,
+        max: MAX_TAIL_INTERVAL_MS,
+      });
+
+  return Object.freeze({
+    once,
+    intervalMs,
+    maxCycles,
+    timeoutMs,
+    selection: normalizeTurnSelection({ turnLimit: options.turnLimit }),
+    // An unbounded tail never finishes, so buffered output formats must reject it.
+    bounded: once || maxCycles !== null || timeoutMs !== null,
   });
 }
 

@@ -8,18 +8,29 @@ import {
   normalizeThreadSearchResult,
 } from "./normalize.js";
 import { readProviderJsonl } from "./provider-jsonl.js";
-import { normalizeListOptions, normalizeTurnSelection } from "./query-options.js";
+import {
+  normalizeListOptions,
+  normalizeTailOptions,
+  normalizeTurnSelection,
+} from "./query-options.js";
 import {
   findThreadsFromDatabase,
   listThreadRowsFromDatabase,
   readThreadFromDatabase,
   readThreadWindowFromDatabase,
 } from "./sqlite-store.js";
+import { tailThreadRecords } from "./tail.js";
 
 export const VERSION = packageMetadata.version;
 
 export async function createT3SessionClient(options = {}) {
   const config = resolveConfig(options);
+  const clientNow = typeof options.now === "function" ? options.now : Date.now;
+
+  function observationTimestamp(requestOptions) {
+    const now = typeof requestOptions.now === "function" ? requestOptions.now : clientNow;
+    return new Date(now()).toISOString();
+  }
 
   return Object.freeze({
     config,
@@ -27,14 +38,37 @@ export async function createT3SessionClient(options = {}) {
       validateThreadId(threadId);
       const selection = normalizeTurnSelection(requestOptions);
       const databasePath = requestOptions.db || requestOptions.stateDb || config.stateDb;
+      const observedAt = observationTimestamp(requestOptions);
       if (selection === null) {
         return normalizeThread(readThreadFromDatabase(databasePath, threadId), {
           toolVersion: VERSION,
+          observedAt,
         });
       }
 
       const rows = readThreadWindowFromDatabase(databasePath, threadId, selection);
-      return normalizeThread(rows, { toolVersion: VERSION, selection: rows.selection });
+      return normalizeThread(rows, {
+        toolVersion: VERSION,
+        selection: rows.selection,
+        observedAt,
+      });
+    },
+    // Returns an async iterable of t3-session.tail-record.v1 objects. Not async itself, so
+    // option validation throws before any iteration and before SQLite is opened.
+    tailThread(threadId, requestOptions = {}) {
+      validateThreadId(threadId);
+      const tailOptions = normalizeTailOptions(requestOptions);
+      const databasePath = requestOptions.db || requestOptions.stateDb || config.stateDb;
+      return tailThreadRecords(threadId, {
+        databasePath,
+        tailOptions,
+        toolVersion: VERSION,
+        signal: requestOptions.signal,
+        now: typeof requestOptions.now === "function" ? requestOptions.now : clientNow,
+        sleep: requestOptions.sleep,
+        onDiagnostic: requestOptions.onDiagnostic,
+        readCycle: requestOptions.readCycle,
+      });
     },
     async listThreads(requestOptions = {}) {
       const listOptions = normalizeListOptions(requestOptions);
@@ -84,23 +118,47 @@ export {
   serializeError,
 } from "./errors.js";
 export {
+  ACTIVE_PROVIDER_STATUSES,
+  isActiveProviderStatus,
+  isTerminalTurnState,
   LIST_SCHEMA_VERSION,
+  LIVE_STATE_REASONS,
+  normalizeLiveState,
   normalizeThread,
   normalizeThreadList,
   normalizeThreadSearchResult,
   normalizeThreadSummary,
   parseJsonField,
   SCHEMA_VERSION,
+  TERMINAL_TURN_STATES,
 } from "./normalize.js";
 export {
   DEFAULT_LIST_LIMIT,
+  DEFAULT_TAIL_INTERVAL_MS,
   DEFAULT_TURN_LIMIT,
+  MAX_TAIL_INTERVAL_MS,
+  MIN_TAIL_INTERVAL_MS,
   normalizeCount,
   normalizeListOptions,
   normalizeProjectFilter,
+  normalizeTailOptions,
   normalizeTimestamp,
   normalizeTurnSelection,
 } from "./query-options.js";
+export {
+  buildSortableEntry,
+  chronologicalThreadEntries,
+  compareSortableEntries,
+  RECORD_TYPE_RANK,
+} from "./record-order.js";
+export {
+  MAX_CONSECUTIVE_READ_FAILURES,
+  TAIL_END_REASONS,
+  TAIL_OPERATIONS,
+  TAIL_RECORD_TYPES,
+  TAIL_SCHEMA_VERSION,
+  tailThreadRecords,
+} from "./tail.js";
 export {
   DOCTOR_SCHEMA_VERSION,
   doctorExitCode,
@@ -119,8 +177,10 @@ export {
   listTables,
   listThreadRowsFromDatabase,
   openReadonlyDatabase,
+  readThreadCycleFromDatabase,
   readThreadFromDatabase,
   readThreadWindowFromDatabase,
+  retrieveLiveStateRows,
   retrieveThreadListRows,
   retrieveThreadRows,
   retrieveThreadSearchRows,
