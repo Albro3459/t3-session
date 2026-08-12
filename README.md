@@ -35,7 +35,12 @@ const thread = await client.getThread("THREAD_ID");
 const recentTurn = await client.getThread("THREAD_ID", { lastTurn: true });
 const matches = await client.findThreads({ title: "topic" });
 const page = await client.listThreads({ project: "CodeLaunch", since: "2026-08-10", limit: 20 });
+
+const tail = client.tailThread("THREAD_ID", { maxCycles: 5, turnLimit: 2 });
+for await (const record of tail) { /* t3-session.tail-record.v1 */ }
 ```
+
+`tailThread` accepts an `AbortSignal` (`signal`) for cancellation, and injectable `now()`/`sleep()` functions so tests can drive the tail deterministically without depending on real elapsed time.
 
 ## Configuration
 
@@ -95,6 +100,73 @@ Bounded retrieval options limit `get` to a window of turns instead of the full h
 
 Bounded results are machine-detectable: the normalized thread gains a `selection` object (`kind`, `turnId`, `turnLimit`, `turnOffset`, `totalTurns`, `selectedTurnIds`). Full retrieval omits `selection` entirely, so existing consumers are unaffected. Human output for a bounded read shows a `Selection` block with `Partial history: yes` and labels the sections `Turns (partial)`, `Messages (partial)`, and `Activities (partial)`.
 
+### Live state
+
+Unlike `selection`, which appears only for bounded reads, `liveState` is always present on `getThread()` output — an agent never has to opt in to learn that a thread may still be changing. Fields:
+
+```text
+status                  "active", "idle", or "unknown"; "unknown" means the projection gave no usable signal, not that the thread is settled
+complete                false while the thread still appears to be changing, true once it appears settled
+observedAt              the tool's own read timestamp, ISO-8601 UTC
+providerStatus          the thread's provider session status, or null
+latestTurnId            the latest turn's identifier, or null
+latestTurnState         the latest turn's state, or null
+streamingMessageCount   count of messages currently marked streaming
+reasons                 sorted array of codes explaining why complete is false
+```
+
+`reasons` is drawn from a closed set: `"turn-not-terminal"`, `"streaming-message"`, `"provider-active"`. It is empty exactly when `complete` is `true`. `liveState` describes the thread, not the retrieval window: a bounded `--last-turn` read reports the same `liveState` as a full read of the same thread at the same moment. It is derived from projected signals only — the latest turn's state, streaming message rows, and the provider session status — never from timestamp recency. A thread is not considered active merely because it was updated recently.
+
+## Follow a live thread
+
+```bash
+t3-session get THREAD_ID --format json
+t3-session tail THREAD_ID --once --format jsonl
+t3-session tail THREAD_ID --interval 2000 --format jsonl
+t3-session tail THREAD_ID --max-cycles 5 --turn-limit 2 --format jsonl
+```
+
+`tail` polls the SQLite projection read-only and reports what changed since the previous poll. It never opens the provider JSONL log; the projection is the only live source. Each poll cycle opens a fresh read-only connection, so a long-lived snapshot never hides another process's WAL commits.
+
+Supported options:
+
+```text
+--once                 Poll once, emit the result, and exit
+--interval <ms>        Poll interval in milliseconds; default 1000; integer from 100 to 60000 inclusive
+--max-cycles <n>       Stop after n poll cycles
+--timeout <ms>         Stop after a wall-clock duration, in milliseconds
+--turn-limit <n>       Bound each poll to the newest n turns, reusing the get --turn-limit machinery
+--format jsonl|json    Output format; jsonl is the default
+```
+
+`--once` is mutually exclusive with `--interval`, `--max-cycles`, and `--timeout`. `--max-cycles` and `--timeout` are mutually usable together; whichever fires first stops the tail. With none of `--once`, `--max-cycles`, or `--timeout` given, the tail follows indefinitely until interrupted — this is the only unbounded loop in the package. `--format json` buffers the whole run into a single JSON array of records, so it requires a bounded tail (`--once`, `--max-cycles`, or `--timeout`); an unbounded tail with `--format json` is rejected because it would never finish.
+
+Each line (or array element, for `--format json`) is a `t3-session.tail-record.v1` record:
+
+```text
+schemaVersion   "t3-session.tail-record.v1"
+op              "upsert", "live-state", or "end"
+recordType      "thread", "turn", "message", "activity", "live-state", or "end"
+threadId        the tailed thread's ID
+observedAt      the tool's own read timestamp for the cycle, ISO-8601 UTC
+cycle           1-based poll cycle counter
+data            the record payload
+```
+
+`upsert` means replace-by-identifier, not append: a record seen for the first time and a record whose content changed both arrive as `upsert`, so a consumer keys on the record's stable identifier and replaces rather than accumulating a log. Cycle 1 always emits the full baseline — a `thread` record, then every existing turn, message, and activity record — and later cycles emit `upsert` records only for what is new or changed. Records within a single cycle are in the same chronological order as normalized JSONL. A `live-state` record is emitted in cycle 1 and thereafter only when `liveState` changes. Exactly one `end` record is emitted when the tail stops, carrying a `reason` of `"once"`, `"max-cycles"`, `"timeout"`, `"interrupt"`, or `"thread-not-found"`.
+
+Known limitation: deletions are out of scope for this increment. A record that disappears from the projection is not reported.
+
+Interruption and failure behavior:
+
+- **SIGINT** stops polling, emits the `end` record with reason `"interrupt"`, and exits 0.
+- **A closed stdout**, for example under `head`, is handled quietly — no unhandled `EPIPE` error.
+- **A busy or locked database** during a cycle is retried on the next cycle rather than killing the tail, up to three consecutive failures, with a machine-readable diagnostic written to stderr each time. The fourth consecutive failure exits 4, the same code as other database-unavailable errors.
+- **A thread that disappears mid-tail** emits the `end` record with reason `"thread-not-found"` and exits 2, the same code `get` uses for a missing thread.
+- **A missing thread at startup** behaves exactly like `get`: exit 2, nothing on stdout.
+
+Exit codes are unchanged from Increment 1.
+
 ## Search and diagnose
 
 Title search is trimmed, case-insensitive, parameterized, excludes deleted threads, and does not search message content:
@@ -125,6 +197,7 @@ t3-session schema thread.v1
 t3-session schema error.v1
 t3-session schema jsonl-record.v1
 t3-session schema list.v1
+t3-session schema tail-record.v1
 ```
 
 The bundled schemas are versioned and are included in the npm package.
@@ -161,12 +234,13 @@ The package opens SQLite read-only, allows SQLite WAL/SHM files to be used, and 
 
 The normalized output is versioned as `t3-session.thread.v1`. JSONL records are versioned as `t3-session.jsonl-record.v1`, and machine-readable errors as `t3-session.error.v1`. New fields may be added without changing existing field meanings; a breaking output change requires a new schema version. The public API and CLI commands remain stable across compatible releases.
 
-`t3-session.list.v1` is a new schema for the paginated `list` command; it does not replace or version `thread.v1`. `selection` is an additive optional field on `thread.v1` — it is present only for bounded `get` retrieval, so existing consumers that read full threads are unaffected.
+`t3-session.list.v1` is a new schema for the paginated `list` command; it does not replace or version `thread.v1`. `selection` is an additive optional field on `thread.v1` — it is present only for bounded `get` retrieval, so existing consumers that read full threads are unaffected. `t3-session.tail-record.v1` is a new schema for the `tail` command; it does not version or replace `t3-session.jsonl-record.v1`, because tail records carry an operation and an observation timestamp that thread JSONL records do not.
 
-The package is still pre-1.0, so two ordering corrections are recorded here explicitly:
+The package is still pre-1.0, so three corrections are recorded here explicitly:
 
 - Normalized JSONL (`get --format jsonl`) changed from grouped order (all turns, then all messages, then all activities) to chronological order by event timestamp.
 - `find`'s default order changed from newest-first (`updated_at` descending) to oldest-first chronological, matching `list`; use `--reverse` to restore newest-first. Ties now break deterministically on `thread_id`.
+- `liveState` is a new always-present property on `thread.v1`, which means `get --format json` output is no longer byte-identical to 0.1.0 output. This is an accepted additive change for a pre-1.0 package and does not create a `thread.v2`.
 
 ## Development
 

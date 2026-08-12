@@ -77,7 +77,36 @@ An empty `threads` array from `list` can mean the offset ran past the end of the
 
 ## Active or partially persisted thread
 
-The SQLite projection can lag a turn that is still in progress. Report exactly what the projection currently contains — including any `state` on the newest turn and any `warnings` — and do not promise that the output reflects the live, in-progress state of the conversation. Live tailing of an active thread is a future increment and is not available in this CLI; do not describe it as available or imply that this tool can watch a thread update in real time.
+The SQLite projection can lag a turn that is still in progress. Every `get` result carries a `liveState` object; check `liveState.complete` before summarizing a thread, and report the projection's contents honestly — including any `state` on the newest turn, `liveState.reasons`, and any `warnings`. Do not present an in-flight turn as finished just because it appears in the output.
+
+```bash
+t3-session get THREAD_ID --format json
+```
+
+If `liveState.complete` is `false`, follow with a bounded tail rather than re-polling `get` by hand:
+
+```bash
+t3-session tail THREAD_ID --once --format jsonl
+t3-session tail THREAD_ID --max-cycles 5 --turn-limit 2 --format jsonl
+```
+
+`tail --once` answers "what does the thread look like right now, including anything that changed since I last checked." A bounded `--max-cycles` or `--timeout` tail follows the thread for a limited window inside an automated workflow; never start an unbounded tail (no `--once`, `--max-cycles`, or `--timeout`) outside an interactive session where a human can interrupt it. Treat every `upsert` record as replace-by-identifier, not append, and rely on the chronological order within each cycle instead of re-sorting.
+
+### A thread that never becomes complete
+
+`liveState.reasons` explains why `complete` is `false`: `"turn-not-terminal"` means the latest turn's state is not one of the known terminal states (an unrecognized turn state is deliberately treated as non-terminal, since guessing that an unfamiliar state means "finished" is the more damaging error); `"streaming-message"` means at least one message row is still marked streaming; `"provider-active"` means the provider session status itself is an active-looking value. If a thread stays incomplete across repeated checks, report it as still active and describe which reasons are present — do not wait indefinitely for `complete` to become `true`, and do not infer completion from elapsed time.
+
+### A tail that emits nothing
+
+Cycle 1 of a tail always emits a full baseline (a `thread` record, every existing turn/message/activity record, and a `live-state` record). If later cycles emit no data records, that means nothing changed in the projection — it does not mean the tail is broken. To get a definite, one-shot answer instead of waiting on a live interval, use `--once` or a small `--max-cycles`:
+
+```bash
+t3-session tail THREAD_ID --once --format jsonl
+```
+
+### A busy or locked database during a tail
+
+A busy or locked SQLite database on one poll cycle does not kill the tail; it is retried on the next cycle, up to three consecutive failures, with a machine-readable diagnostic written to stderr on each attempt while stdout stays clean. The fourth consecutive failure exits 4. Report the failure and the stderr diagnostics rather than looping the CLI manually to retry — the tail already retries within its own bounds, and a fourth failure is a real condition to surface, not something to paper over.
 
 ## Partial provider history
 

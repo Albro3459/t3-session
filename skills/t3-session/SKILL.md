@@ -1,6 +1,6 @@
 ---
 name: "t3-session"
-description: "Use when a T3 Code conversation thread must be recovered from the local read-only projection by exact thread ID, listed or filtered as a candidate, searched by title, diagnosed, inspected through provider JSONL, or read as a bounded window of recent turns."
+description: "Use when a T3 Code conversation thread must be recovered from the local read-only projection by exact thread ID, listed or filtered as a candidate, searched by title, diagnosed, inspected through provider JSONL, read as a bounded window of recent turns, checked for live/complete state, or followed with a bounded tail while it is still active."
 ---
 
 # T3 Session Skill
@@ -33,6 +33,18 @@ Use `t3-session --help` to print the current command reference.
 6. Use `--raw-jsonl` only when projection data is insufficient. Preserve and report warnings and machine-readable diagnostics rather than hiding them.
 7. Run `t3-session doctor --format json` when the database or expected projection schema is unavailable. Avoid broad storage discovery, and avoid printing sensitive transcript content beyond what the task requires.
 
+## Live state and following an active thread
+
+Every `get` result carries a `liveState` object, and a thread can be actively changing. Follow these rules:
+
+1. Read `liveState.complete` before summarizing a thread. If it is `false`, say plainly that the thread is still active — do not present an in-flight turn as finished.
+2. Prefer `t3-session get THREAD_ID --last-turn --format json` for a one-shot check of current state, and `t3-session tail THREAD_ID --once --format jsonl` for a change-oriented check (what changed since a known point).
+3. Inside an automated workflow, use a bounded tail — `--once`, `--max-cycles`, or `--timeout` — and never start an unbounded tail. An unbounded tail only makes sense in an interactive session where a human can interrupt it.
+4. Treat every `upsert` tail record as replace-by-identifier, not append. A record seen for the first time and a record whose content changed both arrive as `upsert`; key on the record's stable identifier and replace rather than accumulating a log.
+5. Rely on the chronological ordering of records within a tail cycle, the same ordering `get --format jsonl` uses. Do not re-sort records.
+6. Report interruption, retry diagnostics, and partial reads honestly. If a tail ends with reason `"interrupt"`, stops after `--max-cycles` or `--timeout`, or hit retried database errors, say so — do not present a partial tail as a complete transcript.
+7. Do not use provider JSONL to determine live state. The SQLite projection is canonical for `liveState`, and `tail` never opens the provider log.
+
 ## Safe defaults
 
 - Retrieval is read-only.
@@ -49,6 +61,13 @@ t3-session list --project "CodeLaunch" --since 2026-08-10 --format json
 t3-session get THREAD_ID --last-turn --format json
 t3-session get THREAD_ID --turn-limit 3 --format jsonl
 t3-session get THREAD_ID --format jsonl
+```
+
+```bash
+t3-session get THREAD_ID --format json
+t3-session tail THREAD_ID --once --format jsonl
+t3-session tail THREAD_ID --interval 2000 --format jsonl
+t3-session tail THREAD_ID --max-cycles 5 --turn-limit 2 --format jsonl
 ```
 
 ```bash

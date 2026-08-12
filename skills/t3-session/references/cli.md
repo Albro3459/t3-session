@@ -68,6 +68,77 @@ Selection: turns are selected from the newest side, then always emitted in chron
 
 Bounded output carries a `selection` object on the normalized thread: `kind` (`"turn"` or `"turn-window"`), `turnId`, `turnLimit`, `turnOffset`, `totalTurns`, `selectedTurnIds`. Full retrieval omits `selection` entirely — its presence is the machine-readable signal that output is partial. Human output for a bounded read adds a `Selection` block with `Partial history: yes` and renames the sections `Turns (partial)`, `Messages (partial)`, `Activities (partial)`.
 
+### Live state
+
+`liveState` is always present on `getThread()` output, unlike `selection`, which appears only for bounded reads:
+
+- `status` — `"active"`, `"idle"`, or `"unknown"`; `"unknown"` means the projection gave no usable signal, not a default for a settled thread.
+- `complete` — `false` while the thread still appears to be changing, `true` once settled. Describes the thread, not the retrieval window: a bounded `--last-turn` read reports the same `liveState` as a full read of the same thread at the same moment.
+- `observedAt` — the tool's own read timestamp, ISO-8601 UTC.
+- `providerStatus` — the thread's provider session status, or `null`.
+- `latestTurnId` — the latest turn's identifier, or `null`.
+- `latestTurnState` — the latest turn's state, or `null`.
+- `streamingMessageCount` — count of messages currently marked streaming.
+- `reasons` — sorted, deduplicated codes from the closed set `"turn-not-terminal"`, `"streaming-message"`, `"provider-active"`, explaining why `complete` is `false`; empty when `complete` is `true`.
+
+`liveState` is derived from projected signals only — the latest turn's state, streaming message rows, and the provider session status — never from timestamp recency.
+
+## Follow a live thread
+
+```bash
+t3-session tail <thread-id>
+t3-session tail <thread-id> --once --format jsonl
+t3-session tail <thread-id> --interval <ms> --format jsonl
+t3-session tail <thread-id> --max-cycles <n> --timeout <ms> --turn-limit <n> --format jsonl
+```
+
+`tail` is read-only and polls the SQLite projection. It never opens the provider JSONL log. Each poll cycle opens a fresh read-only connection, reads inside a deferred transaction, rolls back, and closes — the same pattern as `get` — so a long-lived snapshot never hides another process's WAL commits.
+
+Options:
+
+- `--once` — poll once, emit the result, and exit. Mutually exclusive with `--interval`, `--max-cycles`, and `--timeout`.
+- `--interval <ms>` — poll interval in milliseconds; default 1000; validated as an integer from 100 to 60000 inclusive, rejected outside that range before SQLite is opened.
+- `--max-cycles <n>` — stop after `n` poll cycles. Usable together with `--timeout`; whichever fires first stops the tail.
+- `--timeout <ms>` — stop after a wall-clock duration in milliseconds. Usable together with `--max-cycles`.
+- `--turn-limit <n>` — bound each poll cycle to the newest `n` turns; reuses the same `normalizeCount`-validated window machinery as `get --turn-limit`.
+- `--format jsonl|json` — `jsonl` is the default, one record per line. `json` buffers the whole run into a single JSON array and is only accepted with a bounded tail (`--once`, `--max-cycles`, or `--timeout`); an unbounded tail with `--format json` is rejected because it would never finish.
+
+With none of `--once`, `--max-cycles`, or `--timeout` given, `tail` follows indefinitely until interrupted — the only unbounded loop in the package. `tail` rejects `--title`, `--raw-jsonl`, and every `list`-only filter option, following the same per-command rejection rules as other commands.
+
+### Tail record contract
+
+Each emitted record is `t3-session.tail-record.v1`:
+
+```text
+schemaVersion   "t3-session.tail-record.v1"
+op              "upsert", "live-state", or "end"
+recordType      "thread", "turn", "message", "activity", "live-state", or "end"
+threadId        the tailed thread's ID (nullable)
+observedAt      the tool's own read timestamp for the cycle, ISO-8601 UTC
+cycle           1-based poll cycle counter (0 only on an end record emitted before any cycle ran)
+data            the record payload
+```
+
+`upsert` is replace-by-identifier, not append: a record seen for the first time and a record whose content changed both arrive as `upsert`. Consumers key on the record's stable identifier (turn, message, or activity ID) and replace. Cycle 1 emits the full baseline — a `thread` record, then every turn, message, and activity record, all `upsert` — and later cycles emit `upsert` only for records that are new or changed. Records within a cycle are in the same chronological order as normalized JSONL; do not re-sort them. A `live-state` record is emitted in cycle 1 and thereafter only when `liveState` changes. Exactly one `end` record is emitted when the tail stops, with `data.reason` one of:
+
+- `"once"` — `--once` completed its single poll.
+- `"max-cycles"` — `--max-cycles` was reached.
+- `"timeout"` — `--timeout` elapsed.
+- `"interrupt"` — SIGINT (or an aborted `AbortSignal` in the Node API) stopped the tail.
+- `"thread-not-found"` — the thread disappeared or became unreadable mid-tail.
+
+Deletions are out of scope for this increment: a record that disappears from the projection is not reported.
+
+### Interruption, retries, and exit codes
+
+- **SIGINT** stops polling, emits the `end` record with reason `"interrupt"`, flushes stdout, and exits 0.
+- **A closed stdout**, for example under `head`, is handled quietly — no unhandled `EPIPE` error.
+- **A busy or locked database** during a cycle does not kill the tail; it is retried on the next cycle, up to three consecutive failures, with a machine-readable diagnostic written to stderr each time. The fourth consecutive failure raises the existing `DatabaseUnavailableError` and exits 4.
+- **A thread that disappears mid-tail** emits the `end` record with reason `"thread-not-found"` and exits 2, matching `ThreadNotFoundError`.
+- **A missing thread at startup** behaves exactly like `get`: `ThreadNotFoundError`, exit 2, nothing on stdout.
+
+Exit codes are unchanged from Increment 1.
+
 ## Search and diagnose
 
 ```bash
@@ -87,6 +158,7 @@ t3-session schema thread.v1
 t3-session schema error.v1
 t3-session schema jsonl-record.v1
 t3-session schema list.v1
+t3-session schema tail-record.v1
 ```
 
 Schema output is written to stdout and is suitable for redirecting into a fixture or validator.
