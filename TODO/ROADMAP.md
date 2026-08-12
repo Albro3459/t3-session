@@ -43,6 +43,8 @@ Implement after Increment 1 is complete and reviewed:
 - Add WAL/live-update fixtures and tests.
 - Add Skill examples for checking an active thread and following updates.
 
+Implementation details and acceptance criteria are in `TODO/INCREMENT-2-PLAN.md`.
+
 Increment 2 must not be started as part of the current Increment 1 implementation.
 
 ## Increment 3: subagent participants and hierarchy
