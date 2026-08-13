@@ -1,4 +1,5 @@
 import { parseJsonField } from "./normalize.js";
+import { VERSION } from "./version.js";
 
 export const PARTICIPANTS_SCHEMA_VERSION = "t3-session.participants.v1";
 
@@ -40,7 +41,16 @@ const SCALAR_FIELDS = Object.freeze([
   "isBackgrounded",
 ]);
 
+const BOOLEAN_FIELDS = new Set(["isBackgrounded"]);
+
 const CONSUMED_KEYS = new Set([...SCALAR_FIELDS, "taskId", "parentAgentId", "usage", "typedUsage"]);
+
+// camelCase key on typedUsage, snake_case key on usage.
+const USAGE_FIELDS = Object.freeze([
+  ["totalTokens", "total_tokens"],
+  ["toolUses", "tool_uses"],
+  ["durationMs", "duration_ms"],
+]);
 
 export function isTerminalTaskStatus(status) {
   return typeof status === "string" && TERMINAL_TASK_STATUS_SET.has(status.trim().toLowerCase());
@@ -57,15 +67,38 @@ function numberOrNull(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function normalizeUsage(typedUsage, usage) {
-  const typed = typedUsage && typeof typedUsage === "object" ? typedUsage : null;
-  const raw = usage && typeof usage === "object" ? usage : null;
+// Usage is folded per field, not as a whole object: a later task.progress that reports only
+// totalTokens must not erase a toolUses that an earlier activity already reported.
+function mergeUsage(target, source, snakeCase) {
+  if (!source || typeof source !== "object") {
+    return;
+  }
+  for (const [camel, snake] of USAGE_FIELDS) {
+    const value = numberOrNull(source[snakeCase ? snake : camel]);
+    if (value !== null) {
+      target[camel] = value;
+    }
+  }
+}
 
-  return {
-    totalTokens: numberOrNull(typed?.totalTokens) ?? numberOrNull(raw?.total_tokens),
-    toolUses: numberOrNull(typed?.toolUses) ?? numberOrNull(raw?.tool_uses),
-    durationMs: numberOrNull(typed?.durationMs) ?? numberOrNull(raw?.duration_ms),
-  };
+function emptyUsage() {
+  return { totalTokens: null, toolUses: null, durationMs: null };
+}
+
+// The projection carries an identifier as a string, but a malformed payload must not emit a
+// non-string taskId and break the tool's own schema.
+function identifierOrNull(value) {
+  if (typeof value === "string") return value === "" ? null : value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "bigint") return String(value);
+  return null;
+}
+
+function stringOrNull(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "bigint" || typeof value === "boolean") return String(value);
+  return null;
 }
 
 // Null created_at sorts last, matching the Increment 1 ordering rule.
@@ -136,10 +169,10 @@ function foldActivities(taskId, rows) {
 
   const turnIds = new Set();
   const adapterSpecific = {};
+  const typedUsage = emptyUsage();
+  const usage = emptyUsage();
   let parentAgentId = null;
   let hasStatusField = false;
-  let typedUsage = null;
-  let usage = null;
   let firstSeenAt = null;
   let lastSeenAt = null;
   let turnId = null;
@@ -161,22 +194,29 @@ function foldActivities(taskId, rows) {
     }
 
     for (const field of SCALAR_FIELDS) {
-      const value = payload[field];
-      if (value !== undefined && value !== null) {
-        participant[field] = value;
-        if (field === "status") hasStatusField = true;
+      const raw = payload[field];
+      if (raw === undefined || raw === null) {
+        continue;
       }
+      // A value of the wrong type is kept in adapterSpecific rather than emitted at the top
+      // level, where it would violate the declared type in participants.v1.json.
+      const value = BOOLEAN_FIELDS.has(field)
+        ? (typeof raw === "boolean" ? raw : null)
+        : stringOrNull(raw);
+      if (value === null) {
+        adapterSpecific[field] = raw;
+        continue;
+      }
+      participant[field] = value;
+      if (field === "status") hasStatusField = true;
     }
 
-    if (payload.parentAgentId !== undefined && payload.parentAgentId !== null) {
-      parentAgentId = payload.parentAgentId;
+    const resolvedParent = identifierOrNull(payload.parentAgentId);
+    if (resolvedParent !== null) {
+      parentAgentId = resolvedParent;
     }
-    if (payload.typedUsage !== undefined && payload.typedUsage !== null) {
-      typedUsage = payload.typedUsage;
-    }
-    if (payload.usage !== undefined && payload.usage !== null) {
-      usage = payload.usage;
-    }
+    mergeUsage(typedUsage, payload.typedUsage, false);
+    mergeUsage(usage, payload.usage, true);
 
     for (const [key, value] of Object.entries(payload)) {
       if (!CONSUMED_KEYS.has(key) && value !== undefined && value !== null) {
@@ -186,12 +226,18 @@ function foldActivities(taskId, rows) {
   }
 
   participant.state = taskState(participant.status, hasStatusField);
+  // The earliest turn the task was actually tagged with. An activity with a null turn_id
+  // names no turn, so it is skipped rather than reported as an unknown turn.
   participant.turnId = turnId;
   participant.turnIds = [...turnIds].sort();
   participant.firstSeenAt = firstSeenAt;
   participant.lastSeenAt = lastSeenAt;
   participant.activityCount = rows.length;
-  participant.usage = normalizeUsage(typedUsage, usage);
+  participant.usage = {
+    totalTokens: typedUsage.totalTokens ?? usage.totalTokens,
+    toolUses: typedUsage.toolUses ?? usage.toolUses,
+    durationMs: typedUsage.durationMs ?? usage.durationMs,
+  };
 
   if (Object.keys(adapterSpecific).length > 0) {
     participant.adapterSpecific = adapterSpecific;
@@ -212,7 +258,7 @@ function resolveHierarchy(entries, warnings) {
       continue;
     }
 
-    if (parentAgentId === participant.taskId || !byTaskId.has(parentAgentId)) {
+    if (!byTaskId.has(parentAgentId)) {
       warnings.push({
         code: "UNRESOLVED_PARENT",
         message: "A task recorded a parent that does not resolve to a known participant.",
@@ -225,19 +271,21 @@ function resolveHierarchy(entries, warnings) {
     participant.parentTaskId = parentAgentId;
   }
 
-  // Walk each participant's ancestry; anything that fails to reach a root within the number
-  // of participants is inside a cycle and is demoted to a root instead of hanging.
+  // A participant is in a cycle only when following its own parents leads back to itself, so
+  // a task that merely sits downstream of a cycle keeps its own explicit edge. A self-parent
+  // is a one-node cycle, not an unresolved parent: the identifier does resolve.
   const inCycle = new Set();
   for (const entry of entries) {
-    const seen = new Set([entry.participant.taskId]);
+    const start = entry.participant.taskId;
     let current = entry.participant.parentTaskId;
-    while (current !== null) {
-      if (seen.has(current)) {
-        inCycle.add(entry.participant.taskId);
+    let steps = 0;
+    while (current !== null && steps <= entries.length) {
+      if (current === start) {
+        inCycle.add(start);
         break;
       }
-      seen.add(current);
       current = byTaskId.get(current)?.participant.parentTaskId ?? null;
+      steps += 1;
     }
   }
 
@@ -272,10 +320,22 @@ function assignPathsAndDepths(entries) {
     children.get(parentTaskId).push(entry);
   }
 
+  roots.sort((a, b) => compareParticipants(a.participant, b.participant));
+
   // Each label extends its parent's, and the path is every ancestor label under a synthetic
   // "main" root. ancestryKnown carries down the tree: an unresolved or cyclic ancestor makes
-  // every descendant's position unknown too, so none of them get a path.
-  const walk = (entry, depth, label, ancestorSegments, ancestryKnown) => {
+  // every descendant's position unknown too, so none of them get a path. The walk is
+  // iterative so a pathologically deep chain cannot overflow the stack.
+  const pending = roots.map((entry, index) => ({
+    entry,
+    depth: 0,
+    label: `subagent${siblingSuffix(0, index)}`,
+    ancestorSegments: [],
+    ancestryKnown: true,
+  }));
+
+  while (pending.length > 0) {
+    const { entry, depth, label, ancestorSegments, ancestryKnown } = pending.pop();
     const known = ancestryKnown && !entry.unresolvedParent && !entry.cycleMember;
     const segments = [...ancestorSegments, label];
     entry.participant.depth = depth;
@@ -284,14 +344,15 @@ function assignPathsAndDepths(entries) {
     const ownChildren = children.get(entry.participant.taskId) || [];
     ownChildren.sort((a, b) => compareParticipants(a.participant, b.participant));
     ownChildren.forEach((child, index) => {
-      walk(child, depth + 1, `${label}${siblingSuffix(depth + 1, index)}`, segments, known);
+      pending.push({
+        entry: child,
+        depth: depth + 1,
+        label: `${label}${siblingSuffix(depth + 1, index)}`,
+        ancestorSegments: segments,
+        ancestryKnown: known,
+      });
     });
-  };
-
-  roots.sort((a, b) => compareParticipants(a.participant, b.participant));
-  roots.forEach((entry, index) => {
-    walk(entry, 0, `subagent${siblingSuffix(0, index)}`, [], true);
-  });
+  }
 
   return roots;
 }
@@ -320,7 +381,7 @@ export function buildParticipantTree(participants) {
 }
 
 export function normalizeParticipants(rows, {
-  toolVersion = "0.1.0",
+  toolVersion = VERSION,
   threadId,
   options,
 } = {}) {
@@ -335,8 +396,10 @@ export function normalizeParticipants(rows, {
       warnings,
     );
     const payload = parsed.value;
-    const taskId = payload && typeof payload === "object" ? payload.taskId : null;
-    if (taskId === null || taskId === undefined || taskId === "") {
+    const taskId = payload && typeof payload === "object"
+      ? identifierOrNull(payload.taskId)
+      : null;
+    if (taskId === null) {
       continue;
     }
     if (!grouped.has(taskId)) {
@@ -362,6 +425,25 @@ export function normalizeParticipants(rows, {
   const selected = options.limit === null || options.limit === undefined
     ? ordered.slice(offset)
     : ordered.slice(offset, offset + options.limit);
+
+  // counts and hierarchyAvailable describe the whole thread, but a tree can only nest what
+  // the page contains. Say so, rather than letting a consumer read hierarchyAvailable: true
+  // off an envelope whose tree was flattened by paging.
+  if (options.tree) {
+    const pageTaskIds = new Set(selected.map((participant) => participant.taskId));
+    const orphaned = selected
+      .filter((p) => p.parentTaskId !== null && !pageTaskIds.has(p.parentTaskId))
+      .map((p) => p.taskId)
+      .sort();
+    if (orphaned.length > 0) {
+      warnings.push({
+        code: "PARENT_OUT_OF_PAGE",
+        message:
+          "Tree output is incomplete: these tasks have a resolved parent that limit or offset excluded, so they appear at the top level.",
+        details: { taskIds: orphaned },
+      });
+    }
+  }
 
   return {
     schemaVersion: PARTICIPANTS_SCHEMA_VERSION,
