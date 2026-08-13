@@ -1,5 +1,3 @@
-import packageMetadata from "../package.json" with { type: "json" };
-
 import { resolveConfig } from "./config.js";
 import {
   InvalidArgumentsError,
@@ -29,8 +27,9 @@ import {
   formatThreadJson,
   formatThreadJsonl,
 } from "./output.js";
+import { VERSION } from "./version.js";
 
-export const VERSION = packageMetadata.version;
+export { VERSION };
 
 const COMMANDS = ["list", "get", "participants", "tail", "find", "doctor", "schema", "install"];
 const STORAGE_COMMANDS = new Set(["list", "get", "participants", "tail", "find", "doctor"]);

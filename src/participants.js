@@ -169,6 +169,8 @@ function foldActivities(taskId, rows) {
 
   const turnIds = new Set();
   const adapterSpecific = {};
+  const unusableScalars = {};
+  const usableScalars = new Set();
   const typedUsage = emptyUsage();
   const usage = emptyUsage();
   let parentAgentId = null;
@@ -204,10 +206,11 @@ function foldActivities(taskId, rows) {
         ? (typeof raw === "boolean" ? raw : null)
         : stringOrNull(raw);
       if (value === null) {
-        adapterSpecific[field] = raw;
+        unusableScalars[field] = raw;
         continue;
       }
       participant[field] = value;
+      usableScalars.add(field);
       if (field === "status") hasStatusField = true;
     }
 
@@ -238,6 +241,15 @@ function foldActivities(taskId, rows) {
     toolUses: typedUsage.toolUses ?? usage.toolUses,
     durationMs: typedUsage.durationMs ?? usage.durationMs,
   };
+
+  // Resolved after the fold, not during it: a field that produced a usable value in any
+  // activity belongs at the top level alone. Only a field that never resolved is preserved
+  // in its raw projected form, so the same key can never appear in both places.
+  for (const [field, raw] of Object.entries(unusableScalars)) {
+    if (!usableScalars.has(field)) {
+      adapterSpecific[field] = raw;
+    }
+  }
 
   if (Object.keys(adapterSpecific).length > 0) {
     participant.adapterSpecific = adapterSpecific;
