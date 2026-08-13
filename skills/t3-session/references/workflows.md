@@ -126,15 +126,18 @@ Never claim one agent invoked another unless `parentTaskId` is populated on the 
 
 For a quick summary, use each participant's `state` (`"finished"`, `"running"`, or `"unknown"`) rather than the raw `status`, and report `"unknown"` honestly instead of guessing that a task finished.
 
-Report `UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings if present rather than hiding them — they describe a projection that recorded a parent that does not resolve, or contradictory parentage, and the affected participants are correctly reported as roots with no path.
+Report `UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings if present rather than hiding them — they describe a projection that recorded a parent that does not resolve, or contradictory parentage, and the affected participants are correctly reported as roots with no path. A task whose recorded parent is itself is a one-node cycle and is reported as `PARENT_CYCLE`, not `UNRESOLVED_PARENT`. A task merely downstream of a cycle keeps its own explicit `parentTaskId` and only loses its `path` — only tasks actually on the cycle are demoted to roots.
 
 On a participant-heavy thread, bound the view instead of loading everything:
 
 ```bash
+t3-session participants THREAD_ID --last-turn --format json
 t3-session participants THREAD_ID --turn TURN_ID --format jsonl
 ```
 
-`--turn`, `--turn-limit`, or `--limit` keep the response small; real threads have been observed with 261 distinct tasks.
+`--last-turn`, `--turn`, `--turn-limit`, or `--limit` keep the response small; real threads have been observed with 261 distinct tasks.
+
+Watch `counts` when paging: `counts.total` is how many participants matched before `--limit`/`--offset`, and `counts.participants` is how many were actually returned in this page, so the two differ exactly when the result was truncated. `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` describe the whole thread regardless of paging. Do not read a whole-thread field like `hierarchyAvailable` as a claim about only what came back in a small page.
 
 ### A thread with no participants
 
@@ -143,6 +146,12 @@ An empty `participants` array means no `task.*` activities were projected for th
 ### A tree that is unexpectedly flat
 
 `hierarchyAvailable: false` means the projection never recorded an explicit parent for any participant. Do not reconstruct nesting from timestamps, activity order, or task ID similarity — report the flat list and say hierarchy is unavailable for this thread.
+
+A visually flat or partial tree can also happen with `hierarchyAvailable: true`, when `--tree` is combined with `--limit`/`--offset` and a resolved parent falls outside the returned page. That case carries a `PARENT_OUT_OF_PAGE` warning naming the affected child task IDs, and the child is surfaced at the top level rather than dropped. Check for that warning before concluding the projection has no hierarchy — widen or remove `--limit`/`--offset` to see the full nesting.
+
+### A participant missing from a bounded view
+
+`--turn`, `--turn-limit`, `--turn-offset`, and `--last-turn` all bound participants to activities tagged with specific turn IDs. A `task.*` activity recorded with a null `turn_id` can never match that bound, so it never appears in a turn-bounded read — this is deliberate, the same rule `get`'s turn-bounded windows follow, and not a bug. If a participant you expect is missing from a bounded view, re-run `participants` without any turn-selection option to see the whole thread before concluding the participant is absent.
 
 ### A participant stuck in `running`
 

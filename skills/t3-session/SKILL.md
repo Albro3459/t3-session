@@ -51,8 +51,8 @@ Every `get` result carries a `liveState` object, and a thread can be actively ch
 2. Read `hierarchyAvailable` before presenting any tree. State plainly that hierarchy is unavailable when it is `false` — this is the common case for real threads, not a failure.
 3. Never present a flat list as a hierarchy, and never claim one agent invoked another unless `parentTaskId` is populated. Hierarchy comes only from an explicit, resolvable `parentAgentId`; it is never inferred from timestamps, order, or identifier shape.
 4. Prefer `state` over the raw `status` for a quick answer, and report `"unknown"` honestly rather than guessing that a task finished.
-5. Report `UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings rather than hiding them.
-6. Bound the view with `--turn`, `--turn-limit`, or `--limit` on participant-heavy threads — real threads have been observed with 261 distinct tasks.
+5. Report `UNRESOLVED_PARENT`, `PARENT_CYCLE`, and `PARENT_OUT_OF_PAGE` warnings rather than hiding them. `PARENT_OUT_OF_PAGE` means `--tree` was combined with `--limit`/`--offset` and a resolved parent fell outside the returned page; the child is surfaced at the top level instead of dropped. `hierarchyAvailable: true` can legitimately accompany a visually flat or partial tree when this warning is present — check the warning, not the shape of the tree.
+6. Bound the view with `--last-turn`, `--turn`, `--turn-limit`, or `--limit` on participant-heavy threads — real threads have been observed with 261 distinct tasks. A `task.*` activity recorded with a null `turn_id` can never appear in a turn-bounded read; if an expected participant is missing from a bounded view, re-run without turn selection before concluding it is absent.
 7. Combine `participants` with `liveState` when a thread is still active: a participant in `state: "running"` on a settled thread (`liveState.complete: true`) usually means the task ended without a terminal status being projected, not that it is still executing.
 
 ## Safe defaults
@@ -91,6 +91,7 @@ t3-session doctor --format json
 ```bash
 t3-session participants THREAD_ID --format json
 t3-session participants THREAD_ID --tree --format json
+t3-session participants THREAD_ID --last-turn --format json
 t3-session participants THREAD_ID --turn TURN_ID --format jsonl
 ```
 

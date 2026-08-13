@@ -153,6 +153,7 @@ A participant is one `taskId` within one thread, folded from that thread's expli
 Options:
 
 - `--tree` — emit a nested tree instead of a flat array. Supported with `--format json` and `--format human`; rejected with `--format jsonl`, because JSONL is a flat one-record-per-line contract and a nested tree cannot be expressed in it without inventing a second envelope. `--tree` on a thread with no explicit parentage returns every participant as a root — that is correct output, not an error.
+- `--last-turn` — only participants whose activities touch the newest turn; shorthand for a one-turn newest-side window (`selection.kind: "turn-window"`, `turnLimit: 1`, `turnOffset: 0`), the same resolution `get --last-turn` uses. Shares `get`'s mutual-exclusivity rule: cannot be combined with `--turn`, `--turn-limit`, or `--turn-offset`.
 - `--turn <turn-id>` — only participants whose activities touch that turn.
 - `--turn-limit <n>` — only participants touching the newest `n` turns.
 - `--turn-offset <n>` — skip turns from the newest side before applying `--turn-limit`.
@@ -161,7 +162,9 @@ Options:
 - `--reverse` — newest-first instead of the default oldest-first.
 - `--format human|json|jsonl`.
 
-`--turn`, `--turn-limit`, and `--turn-offset` reuse the same `normalizeTurnSelection` validation as `get`, and `--limit`/`--offset` reuse `normalizeCount`; all validation runs before SQLite is opened. `participants` rejects `--title`, `--raw-jsonl`, `--once`, `--interval`, `--max-cycles`, `--timeout`, and the `list`-only filters `--project`, `--since`, `--before`, following the same per-command rejection rules as other commands.
+`--last-turn`, `--turn`, `--turn-limit`, and `--turn-offset` reuse the same `normalizeTurnSelection` validation as `get`, and `--limit`/`--offset` reuse `normalizeCount`; all validation runs before SQLite is opened. `participants` rejects `--title`, `--raw-jsonl`, `--once`, `--interval`, `--max-cycles`, `--timeout`, and the `list`-only filters `--project`, `--since`, `--before`, following the same per-command rejection rules as other commands.
+
+A `task.*` activity recorded with a null `turn_id` can never appear in any turn-bounded read (`--turn`, `--turn-limit`, `--turn-offset`, `--last-turn`): the underlying query matches selected turns with `turn_id IN (...)`, and SQL `NULL` never satisfies an `IN` list. This is deliberate and matches how `get` bounds its own turn windows on `turn_id`. It is a real, observed condition, not an edge case: roughly 98 of 6,338 observed `task.*` rows carry a null `turn_id`. A participant missing from a bounded view is not necessarily missing from the thread — re-run without turn selection to check the whole thread before concluding a participant is absent.
 
 Ordering: sorted by `firstSeenAt`, then by `taskId` as a tie-breaker, in the same direction as `--reverse`. A participant with a null `firstSeenAt` sorts last in both directions, the same null-timestamp rule `list` and `find` use. Sibling labels inside `path` are always assigned in ascending order, so `--reverse` changes the display order without renumbering any path.
 
@@ -179,14 +182,19 @@ Every participant carries `taskId`, `parentTaskId`, `path`, `depth`, `title`, `r
 
 `path` (for example `main.subagent1.subagent1a`) is present only when a participant's entire ancestry to a root is explicitly known and resolvable; it is `null` when any ancestor is unresolved or cyclic. The synthetic first segment is always `main`. Sibling segments are numbered by the deterministic participant ordering (`firstSeenAt`, then `taskId` as a tie-breaker) — that ordering only assigns a label to an already-known child; it is never used to infer the parent/child edge itself, which always comes from `parentAgentId`. `depth` is `0` for a root and `parent.depth + 1` otherwise, computed only through resolved edges.
 
+A task whose `parentAgentId` equals its own `taskId` resolves — the identifier does name a known participant — so it is reported as `PARENT_CYCLE` (a one-node cycle), not `UNRESOLVED_PARENT`. A task that is merely downstream of a cycle, not on the cycle itself, keeps its own explicit `parentTaskId` and loses only its `path`, since ancestry through a broken link can no longer be confirmed; only tasks actually on the cycle are demoted to roots and named in `PARENT_CYCLE`.
+
 Warning codes:
 
 - `UNRESOLVED_PARENT` — a `parentAgentId` was recorded but does not resolve to a known participant. `parentTaskId` stays `null`, `path` stays `null`, and the participant is reported as a root.
-- `PARENT_CYCLE` — recorded parentage forms a cycle (for example A's parent is B and B's parent is A). The cycle members are reported as roots with `path: null` rather than hanging or overflowing.
+- `PARENT_CYCLE` — recorded parentage forms a cycle (for example A's parent is B and B's parent is A, or a task naming itself as its own parent). The cycle members are reported as roots with `path: null` rather than hanging or overflowing.
+- `PARENT_OUT_OF_PAGE` — `--tree` combined with `--limit`/`--offset`, where a resolved parent falls outside the returned page. The child is surfaced at the top level instead of being dropped, and the warning names the affected child task IDs. `counts` and `hierarchyAvailable` describe the whole thread, not the page, so `hierarchyAvailable: true` can legitimately accompany a visually flat or partial tree — check this warning, not just the tree's shape, before concluding hierarchy is missing.
 
 ### Envelope and exit codes
 
-`--format json` and `--format jsonl` emit `t3-session.participants.v1`: `schemaVersion`, `toolVersion`, `threadId`, `ordering`, `selection` (`null` for a whole-thread read, otherwise the turn selection), `counts` (`total`, `participants`, `roots`, `withExplicitParent`, `unresolvedParents` — `total` is the match count before `--limit`/`--offset`, so truncation is detectable), `hierarchyAvailable`, `participants`, and `warnings`. `--format jsonl` emits `t3-session.jsonl-record.v1` records: a `participants` header record carrying the envelope metadata, followed by one `participant` record per participant.
+`--format json` and `--format jsonl` emit `t3-session.participants.v1`: `schemaVersion`, `toolVersion`, `threadId`, `ordering`, `selection` (`null` for a whole-thread read, otherwise the turn selection), `counts`, `hierarchyAvailable`, `participants`, and `warnings`. `--format jsonl` emits `t3-session.jsonl-record.v1` records: a `participants` header record carrying the envelope metadata, followed by one `participant` record per participant.
+
+`counts` has two different scopes, and mixing them up is the easiest mistake a consumer can make: `counts.total` is the number of participants matching before `--limit`/`--offset` is applied, so truncation is detectable; `counts.participants` is how many were actually returned in this page. `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` all describe the whole thread, not the page — they do not change when `--limit`/`--offset` shrinks what is returned.
 
 - A thread that exists but has no task activities returns a valid envelope with an empty `participants` array, `counts.participants: 0`, and `hierarchyAvailable: false` — exit 0, not an error.
 - A missing thread is `ThreadNotFoundError`, exit 2, nothing on stdout, exactly as `get`.

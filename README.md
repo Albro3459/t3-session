@@ -183,6 +183,7 @@ Supported options:
 
 ```text
 --tree                 Emit a nested tree instead of a flat array
+--last-turn            Only participants whose activities touch the newest turn
 --turn <turn-id>       Only participants whose activities touch that turn
 --turn-limit <n>       Only participants touching the newest n turns
 --turn-offset <n>      Skip turns from the newest side before --turn-limit
@@ -192,7 +193,11 @@ Supported options:
 --format human|json|jsonl
 ```
 
-`--limit` has no default, so the full participant list is returned unless a smaller page is requested. `counts.total` reports the number of matching participants before `--limit`/`--offset` is applied, so truncation is detectable even when only a page is returned. `--tree` is rejected together with `--format jsonl`, because JSONL is a flat one-record-per-line contract and a nested tree cannot be expressed in it.
+`--last-turn` is shorthand for a one-turn newest-side window (`selection.kind: "turn-window"`, `turnLimit: 1`, `turnOffset: 0`) — the same resolution `get --last-turn` uses. It shares `get`'s mutual-exclusivity rule: it cannot be combined with `--turn`, `--turn-limit`, or `--turn-offset`.
+
+`--limit` has no default, so the full participant list is returned unless a smaller page is requested. `counts.total` is the number of participants matching before `--limit`/`--offset` is applied, so truncation is detectable; `counts.participants` is how many are actually returned in this page. `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` all describe the whole thread, not just the returned page. `--tree` is rejected together with `--format jsonl`, because JSONL is a flat one-record-per-line contract and a nested tree cannot be expressed in it.
+
+A `task.*` activity recorded with a null `turn_id` can never appear in a turn-bounded read (`--turn`, `--turn-limit`, `--turn-offset`, `--last-turn`) — SQL's `IN` list never matches `NULL`. This is deliberate and matches how `get` bounds its windows on `turn_id`. Real data has these: roughly 98 of 6,338 observed `task.*` rows. If an expected participant is missing from a bounded view, re-run without turn selection to see the whole thread.
 
 Each participant carries `taskId`, `parentTaskId`, `path`, `depth`, `title`, `role`, `model`, `agentKind`, `taskType`, `effort`, `status`, `state`, `summary`, `detail`, `error`, `toolUseId`, `lastToolName`, `workflowName`, `outputFile`, `isBackgrounded`, `turnId`, `turnIds`, `firstSeenAt`, `lastSeenAt`, `activityCount`, and `usage`. Every field is always present; absent projection data yields `null`, never a missing key.
 
@@ -210,7 +215,9 @@ Anything the projection carries that this package does not model — `phases`, `
 
 `path` (for example `main.subagent1.subagent1a`) is present only when a participant's entire ancestry to a root is explicitly known; it is `null` when any ancestor is unresolved or cyclic. Sibling labels are assigned by the deterministic participant ordering below, but that ordering only assigns a label to an already-known child — it is not a way of inferring the parent/child edge itself, which always comes from `parentAgentId`.
 
-`UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings describe a projection that recorded a parent that does not resolve to a known participant, or that recorded contradictory parentage. In both cases the affected participants are reported as roots with a `null` path, rather than being dropped or given an invented placeholder parent.
+`UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings describe a projection that recorded a parent that does not resolve to a known participant, or that recorded contradictory parentage. In both cases the affected participants are reported as roots with a `null` path, rather than being dropped or given an invented placeholder parent. A task whose `parentAgentId` equals its own `taskId` resolves (the identifier does name a known participant), so it is reported as `PARENT_CYCLE`, a one-node cycle, not `UNRESOLVED_PARENT`. A task that is merely downstream of a cycle — not on the cycle itself — keeps its own explicit `parentTaskId`; it only loses its `path`, since ancestry through a broken link can no longer be confirmed. Only tasks actually on the cycle are demoted to roots and named in `PARENT_CYCLE`.
+
+`PARENT_OUT_OF_PAGE` is specific to `--tree` combined with `--limit`/`--offset`: `counts` and `hierarchyAvailable` describe the whole thread, but a tree can only nest what the returned page contains. When a resolved parent falls outside the page, its child is surfaced at the top level instead of being dropped, and this warning names the affected child task IDs. This means `hierarchyAvailable: true` can legitimately accompany a visually flat or partial tree — check the warning, not just the shape of the output, before concluding the hierarchy is missing.
 
 ### Ordering
 
@@ -291,6 +298,8 @@ The normalized output is versioned as `t3-session.thread.v1`. JSONL records are 
 `t3-session.list.v1` is a new schema for the paginated `list` command; it does not replace or version `thread.v1`. `selection` is an additive optional field on `thread.v1` — it is present only for bounded `get` retrieval, so existing consumers that read full threads are unaffected. `t3-session.tail-record.v1` is a new schema for the `tail` command; it does not version or replace `t3-session.jsonl-record.v1`, because tail records carry an operation and an observation timestamp that thread JSONL records do not.
 
 `t3-session.participants.v1` is a new schema for the `participants` command; it does not version or replace `thread.v1`. `"participants"` and `"participant"` were added to the `t3-session.jsonl-record.v1` `recordType` enum as an additive change, the same kind of change as adding `"list"` in Increment 1. Participants are deliberately **not** added to `thread.v1`: `get --format json` already carries `selection` and `liveState`, and adding a third always-present array would change `get` output for every consumer that does not want it. The participant view is a separate command with its own schema instead. This is a decision note, not a breaking-change note — `get` output is unchanged by Increment 3.
+
+The package is pre-1.0 and unpublished. `toolVersion` in every envelope tracks the package version, not a schema version: `0.1.0` covered Increment 1 only, and `0.2.0` now covers Increments 1-3 (list and bounded `get`, `liveState` and `tail`, and `participants`). No schema version changed with this bump — `thread.v1`, `list.v1`, `tail-record.v1`, `jsonl-record.v1`, and `participants.v1` are all unchanged. Check the installed tool version with `t3-session --version`.
 
 The package is still pre-1.0, so three corrections are recorded here explicitly:
 
