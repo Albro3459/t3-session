@@ -21,6 +21,9 @@ import {
   formatListHuman,
   formatListJson,
   formatListJsonl,
+  formatParticipantsHuman,
+  formatParticipantsJson,
+  formatParticipantsJsonl,
   formatRawJsonl,
   formatThreadHuman,
   formatThreadJson,
@@ -29,8 +32,8 @@ import {
 
 export const VERSION = packageMetadata.version;
 
-const COMMANDS = ["list", "get", "tail", "find", "doctor", "schema", "install"];
-const STORAGE_COMMANDS = new Set(["list", "get", "tail", "find", "doctor"]);
+const COMMANDS = ["list", "get", "participants", "tail", "find", "doctor", "schema", "install"];
+const STORAGE_COMMANDS = new Set(["list", "get", "participants", "tail", "find", "doctor"]);
 const FORMATS = new Set(["human", "json", "jsonl"]);
 const TAIL_FORMATS = new Set(["jsonl", "json"]);
 
@@ -54,6 +57,18 @@ const TURN_OPTIONS = [
 // tail reuses the turn-window machinery for --turn-limit but has no notion of an exact
 // turn or a last-turn shortcut, so every other turn-selection option is rejected.
 const TAIL_REJECTED_TURN_OPTIONS = TURN_OPTIONS.filter((def) => def.key !== "turnLimit");
+
+// participants supports --limit, --offset, and --reverse, so only the list-only filters and
+// the tail-only lifecycle options are rejected; turn selection is reused wholesale.
+const PARTICIPANTS_REJECTED_OPTIONS = [
+  { key: "project", option: "--project", kind: "value" },
+  { key: "since", option: "--since", kind: "value" },
+  { key: "before", option: "--before", kind: "value" },
+  { key: "once", option: "--once", kind: "flag" },
+  { key: "interval", option: "--interval", kind: "value" },
+  { key: "maxCycles", option: "--max-cycles", kind: "value" },
+  { key: "timeout", option: "--timeout", kind: "value" },
+];
 
 function isOptionSet(options, def) {
   return def.kind === "flag" ? options[def.key] === true : options[def.key] !== undefined;
@@ -101,6 +116,7 @@ export function parseCliArgs(argv = []) {
     turn: undefined,
     turnLimit: undefined,
     turnOffset: undefined,
+    tree: false,
     rawJsonl: false,
     once: false,
     interval: undefined,
@@ -205,6 +221,11 @@ export function parseCliArgs(argv = []) {
       continue;
     }
 
+    if (value === "--tree") {
+      result.tree = true;
+      continue;
+    }
+
     if (value === "--raw-jsonl") {
       result.rawJsonl = true;
       continue;
@@ -290,6 +311,15 @@ export function formatHelp() {
     "    --turn <turn-id>       Retrieve one exact turn and its records",
     "    --turn-limit <n>       Retrieve a bounded window of turns from the newest side",
     "    --turn-offset <n>      Skip turns from the newest side before --turn-limit",
+    "  participants <thread-id>  List the task participants in a thread",
+    "    --tree                 Nest explicit parent/child relationships",
+    "    --turn <turn-id>       Only participants whose activities touch that turn",
+    "    --turn-limit <n>       Only participants touching the newest n turns",
+    "    --turn-offset <n>      Skip turns from the newest side before --turn-limit",
+    "    --limit <n>            Maximum participants returned",
+    "    --offset <n>           Skip participants before applying --limit",
+    "    --reverse              Newest-first instead of the default oldest-first",
+    "    --format human|json|jsonl",
     "  tail <thread-id>        Follow a thread by polling the read-only projection",
     "    --once                 Poll once, emit the result, and exit",
     "    --interval <ms>        Poll interval in milliseconds; default 1000; 100-60000",
@@ -450,6 +480,80 @@ async function handleGet(options) {
   }
 
   return { output: formatThreadHuman(thread) };
+}
+
+async function handleParticipants(options) {
+  const args = options.args || [];
+  if (options.title !== undefined) {
+    throw new InvalidArgumentsError("--title is only supported by find.", {
+      command: "participants",
+      option: "--title",
+    });
+  }
+
+  if (options.rawJsonl) {
+    throw new InvalidArgumentsError("--raw-jsonl is only supported by get.", {
+      command: "participants",
+      option: "--raw-jsonl",
+    });
+  }
+
+  rejectOptions(options, "participants", PARTICIPANTS_REJECTED_OPTIONS);
+
+  const unknownOption = args.find((argument) => argument.startsWith("-"));
+  if (unknownOption) {
+    throw new InvalidArgumentsError(`Unknown option: ${unknownOption}`, {
+      command: "participants",
+      option: unknownOption,
+    });
+  }
+
+  if (args.length !== 1) {
+    throw new InvalidArgumentsError("participants requires exactly one thread ID.", {
+      command: "participants",
+      expected: "<thread-id>",
+    });
+  }
+
+  const format = options.format || "human";
+  if (!FORMATS.has(format)) {
+    throw new InvalidArgumentsError(`Unsupported output format: ${format}.`, {
+      command: "participants",
+      format,
+      supportedFormats: [...FORMATS],
+    });
+  }
+
+  if (options.tree && format === "jsonl") {
+    throw new InvalidArgumentsError(
+      "--tree cannot be combined with --format jsonl because JSONL is a flat "
+        + "one-record-per-line contract and cannot express a nested tree.",
+      { command: "participants", option: "--tree", format },
+    );
+  }
+
+  const config = options.config || resolveConfig(options);
+  const client = await createT3SessionClient({ home: config.home, db: config.stateDb });
+  const view = await client.listParticipants(args[0], {
+    turnId: options.turn,
+    turnLimit: options.turnLimit,
+    turnOffset: options.turnOffset,
+    lastTurn: options.lastTurn,
+    reverse: options.reverse,
+    limit: options.limit,
+    offset: options.offset,
+    tree: options.tree,
+  });
+
+  if (format === "json") {
+    return { output: formatParticipantsJson(view) };
+  }
+
+  if (format === "jsonl") {
+    return { output: formatParticipantsJsonl(view) };
+  }
+
+  return { output: formatParticipantsHuman(view) };
 }
 
 // tail streams t3-session.tail-record.v1 records straight to the provided stream rather
@@ -715,7 +819,7 @@ async function handleSchema(options) {
   if (options.args.length !== 1 || options.args[0].startsWith("-")) {
     throw new InvalidArgumentsError("schema requires exactly one schema name.", {
       command: "schema",
-      expected: "schema <thread.v1|error.v1|jsonl-record.v1|list.v1|tail-record.v1>",
+      expected: "schema <thread.v1|error.v1|jsonl-record.v1|list.v1|tail-record.v1|participants.v1>",
     });
   }
 
@@ -756,6 +860,7 @@ async function notImplemented(options) {
 const commandHandlers = new Map(COMMANDS.map((command) => [command, notImplemented]));
 commandHandlers.set("list", handleList);
 commandHandlers.set("get", handleGet);
+commandHandlers.set("participants", handleParticipants);
 commandHandlers.set("tail", handleTail);
 commandHandlers.set("find", handleFind);
 commandHandlers.set("doctor", handleDoctor);

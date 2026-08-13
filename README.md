@@ -38,6 +38,8 @@ const page = await client.listThreads({ project: "CodeLaunch", since: "2026-08-1
 
 const tail = client.tailThread("THREAD_ID", { maxCycles: 5, turnLimit: 2 });
 for await (const record of tail) { /* t3-session.tail-record.v1 */ }
+
+const participants = await client.listParticipants("THREAD_ID", { tree: true });
 ```
 
 `tailThread` accepts an `AbortSignal` (`signal`) for cancellation, and injectable `now()`/`sleep()` functions so tests can drive the tail deterministically without depending on real elapsed time.
@@ -167,6 +169,57 @@ Interruption and failure behavior:
 
 Exit codes are unchanged from Increment 1.
 
+## Thread participants
+
+```bash
+t3-session participants THREAD_ID --format json
+t3-session participants THREAD_ID --tree --format json
+t3-session participants THREAD_ID --turn TURN_ID --format jsonl
+```
+
+A participant is one `taskId` within one thread, folded from that thread's explicit `task.started`, `task.progress`, `task.completed`, and `task.updated` activities. The fold is last-non-null-wins per field: a later activity that omits a field does not erase the value an earlier activity set.
+
+Supported options:
+
+```text
+--tree                 Emit a nested tree instead of a flat array
+--turn <turn-id>       Only participants whose activities touch that turn
+--turn-limit <n>       Only participants touching the newest n turns
+--turn-offset <n>      Skip turns from the newest side before --turn-limit
+--limit <n>            Maximum participants returned; no default
+--offset <n>           Skip matching participants before applying --limit
+--reverse              Newest-first instead of the default oldest-first
+--format human|json|jsonl
+```
+
+`--limit` has no default, so the full participant list is returned unless a smaller page is requested. `counts.total` reports the number of matching participants before `--limit`/`--offset` is applied, so truncation is detectable even when only a page is returned. `--tree` is rejected together with `--format jsonl`, because JSONL is a flat one-record-per-line contract and a nested tree cannot be expressed in it.
+
+Each participant carries `taskId`, `parentTaskId`, `path`, `depth`, `title`, `role`, `model`, `agentKind`, `taskType`, `effort`, `status`, `state`, `summary`, `detail`, `error`, `toolUseId`, `lastToolName`, `workflowName`, `outputFile`, `isBackgrounded`, `turnId`, `turnIds`, `firstSeenAt`, `lastSeenAt`, `activityCount`, and `usage`. Every field is always present; absent projection data yields `null`, never a missing key.
+
+`state` is a small summary derived from the raw, projected `status`: `"finished"` when `status` is one of the terminal values (`completed`, `failed`, `stopped`, `cancelled`), `"running"` when a non-terminal or unrecognised status was recorded, and `"unknown"` when no status was ever projected. An unrecognised status is deliberately reported as `"running"` rather than `"finished"`, because claiming a still-running agent has finished is the more damaging error. `status: null` together with `state: "unknown"` means the projection never recorded a status for that task at all.
+
+`usage` is normalized from whichever of `typedUsage` or the snake_case `usage` is present, preferring `typedUsage`. Unknown values stay `null` rather than becoming `0`, so "not reported" and "zero" remain distinguishable.
+
+Anything the projection carries that this package does not model — `phases`, `runHandles`, `timelineBypass`, `usageSnapshot`, `attempt`, `agentIndex`, `phaseIndex`, `phaseTitle`, and similar — appears under `adapterSpecific`, never as a top-level field.
+
+### Hierarchy
+
+`parentTaskId` is populated **only** from an explicit, resolvable `parentAgentId` recorded on a contributing activity. Hierarchy is **never** inferred from timestamps, activity order, sequence, tool-use IDs, or identifier shape. Two tasks that merely ran next to each other are two roots.
+
+`hierarchyAvailable` is the machine-readable signal to check before presenting a tree: it is `true` only when at least one participant has a resolved `parentTaskId`. For the great majority of real threads it is `false`, and that is the correct answer, not a failure — measured against a real local projection, an explicit parent link appeared on roughly 0.5 percent of task activities, in 1 thread out of 111.
+
+`path` (for example `main.subagent1.subagent1a`) is present only when a participant's entire ancestry to a root is explicitly known; it is `null` when any ancestor is unresolved or cyclic. Sibling labels are assigned by the deterministic participant ordering below, but that ordering only assigns a label to an already-known child — it is not a way of inferring the parent/child edge itself, which always comes from `parentAgentId`.
+
+`UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings describe a projection that recorded a parent that does not resolve to a known participant, or that recorded contradictory parentage. In both cases the affected participants are reported as roots with a `null` path, rather than being dropped or given an invented placeholder parent.
+
+### Ordering
+
+Participants are ordered by `firstSeenAt`, then by `taskId` as a deterministic tie-breaker, oldest-first by default; `--reverse` flips both keys. A participant with a null `firstSeenAt` sorts last in **both** directions, the same null-timestamp rule `list` and `find` use — reversing a listing never floats an untimestamped participant to the front.
+
+Sibling labels inside `path` are always assigned in ascending order regardless of `--reverse`, so changing the display order never renumbers a path.
+
+A thread with no task activities returns a valid, empty envelope — `participants: []`, `counts.participants: 0`, `hierarchyAvailable: false` — not an error.
+
 ## Search and diagnose
 
 Title search is trimmed, case-insensitive, parameterized, excludes deleted threads, and does not search message content:
@@ -198,6 +251,7 @@ t3-session schema error.v1
 t3-session schema jsonl-record.v1
 t3-session schema list.v1
 t3-session schema tail-record.v1
+t3-session schema participants.v1
 ```
 
 The bundled schemas are versioned and are included in the npm package.
@@ -235,6 +289,8 @@ The package opens SQLite read-only, allows SQLite WAL/SHM files to be used, and 
 The normalized output is versioned as `t3-session.thread.v1`. JSONL records are versioned as `t3-session.jsonl-record.v1`, and machine-readable errors as `t3-session.error.v1`. New fields may be added without changing existing field meanings; a breaking output change requires a new schema version. The public API and CLI commands remain stable across compatible releases.
 
 `t3-session.list.v1` is a new schema for the paginated `list` command; it does not replace or version `thread.v1`. `selection` is an additive optional field on `thread.v1` — it is present only for bounded `get` retrieval, so existing consumers that read full threads are unaffected. `t3-session.tail-record.v1` is a new schema for the `tail` command; it does not version or replace `t3-session.jsonl-record.v1`, because tail records carry an operation and an observation timestamp that thread JSONL records do not.
+
+`t3-session.participants.v1` is a new schema for the `participants` command; it does not version or replace `thread.v1`. `"participants"` and `"participant"` were added to the `t3-session.jsonl-record.v1` `recordType` enum as an additive change, the same kind of change as adding `"list"` in Increment 1. Participants are deliberately **not** added to `thread.v1`: `get --format json` already carries `selection` and `liveState`, and adding a third always-present array would change `get` output for every consumer that does not want it. The participant view is a separate command with its own schema instead. This is a decision note, not a breaking-change note — `get` output is unchanged by Increment 3.
 
 The package is still pre-1.0, so three corrections are recorded here explicitly:
 

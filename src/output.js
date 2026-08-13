@@ -239,6 +239,96 @@ export function formatListJsonl(list) {
   return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
 }
 
+export function formatParticipantsJson(view) {
+  return `${JSON.stringify(view, null, 2)}\n`;
+}
+
+export function formatParticipantsJsonl(view) {
+  const header = createRecord("participants", view.threadId, {
+    ordering: view.ordering,
+    selection: view.selection,
+    counts: view.counts,
+    hierarchyAvailable: view.hierarchyAvailable,
+    warnings: view.warnings,
+  });
+  const records = [
+    header,
+    ...view.participants.map((participant) => (
+      createRecord("participant", view.threadId, participant)
+    )),
+  ];
+
+  return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+}
+
+function formatParticipantLines(participant, depth) {
+  const indent = "  ".repeat(depth);
+  const lines = [`${indent}- ${participant.title || "(untitled task)"}`];
+  addField(lines, `${indent}    Task ID`, participant.taskId);
+  addField(lines, `${indent}    Role`, participant.role);
+  addField(lines, `${indent}    Model`, participant.model);
+  lines.push(`${indent}    State: ${participant.state}`);
+  addField(lines, `${indent}    Status`, participant.status);
+  addField(lines, `${indent}    Turn`, participant.turnId);
+  lines.push(`${indent}    Activities: ${participant.activityCount}`);
+  if (participant.path) {
+    addField(lines, `${indent}    Path`, participant.path);
+  }
+  return lines;
+}
+
+function collectParticipantLines(participants, depth, lines) {
+  for (const participant of participants) {
+    lines.push(...formatParticipantLines(participant, depth));
+    if (Array.isArray(participant.children) && participant.children.length > 0) {
+      collectParticipantLines(participant.children, depth + 1, lines);
+    }
+  }
+}
+
+export function formatParticipantsHuman(view) {
+  const lines = ["Participants", "============", ""];
+  addField(lines, "Thread ID", view.threadId);
+  lines.push(`Order: ${view.ordering.sortBy} ${view.ordering.direction}`);
+
+  if (view.selection) {
+    lines.push("", "Selection", "---------");
+    addField(lines, "Kind", view.selection.kind);
+    addField(lines, "Turn ID", view.selection.turnId);
+    addField(lines, "Turn limit", view.selection.turnLimit);
+    addField(lines, "Turn offset", view.selection.turnOffset);
+  }
+
+  lines.push("", "Counts", "------");
+  addField(lines, "Total", view.counts.total);
+  addField(lines, "Returned", view.counts.participants);
+  addField(lines, "Roots", view.counts.roots);
+  addField(lines, "With explicit parent", view.counts.withExplicitParent);
+  addField(lines, "Unresolved parents", view.counts.unresolvedParents);
+
+  lines.push("");
+  lines.push(view.hierarchyAvailable
+    ? "Hierarchy: explicit parent/child relationships were recorded for this thread."
+    : "Hierarchy: no explicit parent/child relationships were recorded for this thread. "
+      + "This is a flat list, not a tree; do not present it as one.");
+
+  lines.push("", ...sectionHeading("Task participants"));
+  if (view.participants.length === 0) {
+    lines.push("No task participants.");
+  } else {
+    collectParticipantLines(view.participants, 0, lines);
+  }
+
+  if (view.warnings.length > 0) {
+    lines.push("", "Warnings", "--------");
+    for (const warning of view.warnings) {
+      lines.push(`- ${warning.code}: ${warning.message}`);
+    }
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
 export function formatRawJsonl(records) {
   return records.length === 0
     ? ""

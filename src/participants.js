@@ -91,15 +91,20 @@ function compareActivityRows(a, b) {
   return 0;
 }
 
-function compareParticipants(a, b) {
+// Direction-aware so a reversed listing cannot flip null firstSeenAt to the front: the
+// Increment 1 rule is that a null ordering timestamp sorts last in both directions.
+function compareParticipants(a, b, reverse = false) {
   const left = a.firstSeenAt ?? null;
   const right = b.firstSeenAt ?? null;
   if (left === null && right !== null) return 1;
   if (left !== null && right === null) return -1;
-  if (left !== null && right !== null && left !== right) return left < right ? -1 : 1;
-  if (a.taskId < b.taskId) return -1;
-  if (a.taskId > b.taskId) return 1;
-  return 0;
+
+  const flip = reverse ? -1 : 1;
+  if (left !== null && right !== null && left !== right) {
+    return (left < right ? -1 : 1) * flip;
+  }
+  if (a.taskId === b.taskId) return 0;
+  return (a.taskId < b.taskId ? -1 : 1) * flip;
 }
 
 function alphabeticLabel(index) {
@@ -344,10 +349,11 @@ export function normalizeParticipants(rows, {
   resolveHierarchy(entries, warnings);
   assignPathsAndDepths(entries);
 
-  const ordered = entries.map((entry) => entry.participant).sort(compareParticipants);
-  if (options.reverse) {
-    ordered.reverse();
-  }
+  // Sibling labels above are always assigned in ascending order, so --reverse changes the
+  // display order without renumbering any path.
+  const ordered = entries
+    .map((entry) => entry.participant)
+    .sort((a, b) => compareParticipants(a, b, options.reverse));
 
   const total = ordered.length;
   const withExplicitParent = ordered.filter((p) => p.parentTaskId !== null).length;

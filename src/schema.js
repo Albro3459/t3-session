@@ -11,6 +11,7 @@ const SCHEMA_FILES = Object.freeze({
   "jsonl-record.v1": "jsonl-record.v1.json",
   "list.v1": "list.v1.json",
   "tail-record.v1": "tail-record.v1.json",
+  "participants.v1": "participants.v1.json",
 });
 
 export function resolveSchemaPath(name) {

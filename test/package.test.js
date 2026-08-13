@@ -25,6 +25,7 @@ const requiredReleaseFiles = [
   "schemas/jsonl-record.v1.json",
   "schemas/list.v1.json",
   "schemas/tail-record.v1.json",
+  "schemas/participants.v1.json",
   "skills/t3-session/SKILL.md",
   "skills/t3-session/references/cli.md",
   "skills/t3-session/references/workflows.md",
@@ -45,6 +46,7 @@ test("bundled JSON schemas are valid JSON with stable version identifiers", () =
     "schemas/jsonl-record.v1.json": "t3-session.jsonl-record.v1",
     "schemas/list.v1.json": "t3-session.list.v1",
     "schemas/tail-record.v1.json": "t3-session.tail-record.v1",
+    "schemas/participants.v1.json": "t3-session.participants.v1",
   };
 
   for (const [relativePath, version] of Object.entries(expectedVersions)) {

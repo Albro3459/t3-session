@@ -139,6 +139,59 @@ Deletions are out of scope for this increment: a record that disappears from the
 
 Exit codes are unchanged from Increment 1.
 
+## Thread participants
+
+```bash
+t3-session participants <thread-id>
+t3-session participants <thread-id> --format json
+t3-session participants <thread-id> --tree --format json
+t3-session participants <thread-id> --turn <turn-id> --format jsonl
+```
+
+A participant is one `taskId` within one thread, folded from that thread's explicit `task.started`, `task.progress`, `task.completed`, and `task.updated` activities, in the same chronological activity order `get` uses. The fold is last-non-null-wins per scalar field: a later activity that omits a field does not erase a value an earlier activity set.
+
+Options:
+
+- `--tree` — emit a nested tree instead of a flat array. Supported with `--format json` and `--format human`; rejected with `--format jsonl`, because JSONL is a flat one-record-per-line contract and a nested tree cannot be expressed in it without inventing a second envelope. `--tree` on a thread with no explicit parentage returns every participant as a root — that is correct output, not an error.
+- `--turn <turn-id>` — only participants whose activities touch that turn.
+- `--turn-limit <n>` — only participants touching the newest `n` turns.
+- `--turn-offset <n>` — skip turns from the newest side before applying `--turn-limit`.
+- `--limit <n>` — maximum participants returned; **no default**, so the full participant list is returned unless a smaller page is explicitly requested.
+- `--offset <n>` — skip matching participants before applying `--limit`; default 0.
+- `--reverse` — newest-first instead of the default oldest-first.
+- `--format human|json|jsonl`.
+
+`--turn`, `--turn-limit`, and `--turn-offset` reuse the same `normalizeTurnSelection` validation as `get`, and `--limit`/`--offset` reuse `normalizeCount`; all validation runs before SQLite is opened. `participants` rejects `--title`, `--raw-jsonl`, `--once`, `--interval`, `--max-cycles`, `--timeout`, and the `list`-only filters `--project`, `--since`, `--before`, following the same per-command rejection rules as other commands.
+
+Ordering: sorted by `firstSeenAt`, then by `taskId` as a tie-breaker, in the same direction as `--reverse`. A participant with a null `firstSeenAt` sorts last in both directions, the same null-timestamp rule `list` and `find` use. Sibling labels inside `path` are always assigned in ascending order, so `--reverse` changes the display order without renumbering any path.
+
+### Participant fields
+
+Every participant carries `taskId`, `parentTaskId`, `path`, `depth`, `title`, `role`, `model`, `agentKind`, `taskType`, `effort`, `status`, `state`, `summary`, `detail`, `error`, `toolUseId`, `lastToolName`, `workflowName`, `outputFile`, `isBackgrounded`, `turnId`, `turnIds`, `firstSeenAt`, `lastSeenAt`, `activityCount`, and `usage`. Every field is always present; absent projection data is `null`, never a missing key. `usage` has `totalTokens`, `toolUses`, `durationMs`, normalized from whichever of `typedUsage` or the snake_case `usage` is present, preferring `typedUsage`; unknown values stay `null`, not `0`. Anything the projection carries that is not modeled above (`phases`, `runHandles`, `timelineBypass`, `usageSnapshot`, `attempt`, `agentIndex`, `phaseIndex`, `phaseTitle`, and similar) appears under `adapterSpecific`, never as a top-level field.
+
+`state` versus `status`: `status` is the raw, projected value (or `null` if none was ever recorded). `state` is a derived summary — `"finished"` when `status` is one of the terminal values (`completed`, `failed`, `stopped`, `cancelled`), `"running"` when a non-terminal or unrecognised status was recorded, and `"unknown"` when no status was ever projected. An unrecognised status is deliberately reported as `"running"`, not `"finished"`, because claiming a still-running agent has finished is the more damaging error. `status: null` with `state: "unknown"` means the projection never recorded a status.
+
+### Hierarchy
+
+`parentTaskId` is populated **only** from an explicit `parentAgentId` recorded on a contributing activity, and only when it resolves to another participant's `taskId` in the same thread. Hierarchy is **never** inferred from timestamps, activity order, `sequence`, tool-use IDs, or identifier shape — two tasks that merely ran next to each other are two roots.
+
+`hierarchyAvailable` is the machine-readable signal to check before presenting a tree: `true` only when at least one participant has a resolved `parentTaskId`. It is `false` for the great majority of real threads, and that is the correct, expected answer, not a failure.
+
+`path` (for example `main.subagent1.subagent1a`) is present only when a participant's entire ancestry to a root is explicitly known and resolvable; it is `null` when any ancestor is unresolved or cyclic. The synthetic first segment is always `main`. Sibling segments are numbered by the deterministic participant ordering (`firstSeenAt`, then `taskId` as a tie-breaker) — that ordering only assigns a label to an already-known child; it is never used to infer the parent/child edge itself, which always comes from `parentAgentId`. `depth` is `0` for a root and `parent.depth + 1` otherwise, computed only through resolved edges.
+
+Warning codes:
+
+- `UNRESOLVED_PARENT` — a `parentAgentId` was recorded but does not resolve to a known participant. `parentTaskId` stays `null`, `path` stays `null`, and the participant is reported as a root.
+- `PARENT_CYCLE` — recorded parentage forms a cycle (for example A's parent is B and B's parent is A). The cycle members are reported as roots with `path: null` rather than hanging or overflowing.
+
+### Envelope and exit codes
+
+`--format json` and `--format jsonl` emit `t3-session.participants.v1`: `schemaVersion`, `toolVersion`, `threadId`, `ordering`, `selection` (`null` for a whole-thread read, otherwise the turn selection), `counts` (`total`, `participants`, `roots`, `withExplicitParent`, `unresolvedParents` — `total` is the match count before `--limit`/`--offset`, so truncation is detectable), `hierarchyAvailable`, `participants`, and `warnings`. `--format jsonl` emits `t3-session.jsonl-record.v1` records: a `participants` header record carrying the envelope metadata, followed by one `participant` record per participant.
+
+- A thread that exists but has no task activities returns a valid envelope with an empty `participants` array, `counts.participants: 0`, and `hierarchyAvailable: false` — exit 0, not an error.
+- A missing thread is `ThreadNotFoundError`, exit 2, nothing on stdout, exactly as `get`.
+- Rejected or invalid options return the existing machine-readable `t3-session.error.v1` error, exit 3.
+
 ## Search and diagnose
 
 ```bash
@@ -159,6 +212,7 @@ t3-session schema error.v1
 t3-session schema jsonl-record.v1
 t3-session schema list.v1
 t3-session schema tail-record.v1
+t3-session schema participants.v1
 ```
 
 Schema output is written to stdout and is suitable for redirecting into a fixture or validator.

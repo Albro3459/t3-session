@@ -108,6 +108,46 @@ t3-session tail THREAD_ID --once --format jsonl
 
 A busy or locked SQLite database on one poll cycle does not kill the tail; it is retried on the next cycle, up to three consecutive failures, with a machine-readable diagnostic written to stderr on each attempt while stdout stays clean. The fourth consecutive failure exits 4. Report the failure and the stderr diagnostics rather than looping the CLI manually to retry — the tail already retries within its own bounds, and a fourth failure is a real condition to surface, not something to paper over.
 
+## Who worked on this thread
+
+Use `participants` instead of guessing from message text or tool activity when the task is "who worked on this thread" or "what did each agent do":
+
+```bash
+t3-session participants THREAD_ID --format json
+```
+
+Check `hierarchyAvailable` before presenting anything as a tree. It is `false` for the great majority of real threads — that is the correct, expected answer, not a failure, so say so plainly rather than implying the data is missing or broken. Only ask for a tree once `hierarchyAvailable` is confirmed:
+
+```bash
+t3-session participants THREAD_ID --tree --format json
+```
+
+Never claim one agent invoked another unless `parentTaskId` is populated on the child. Hierarchy comes only from an explicit, resolvable `parentAgentId` recorded in the projection — never from timestamps, activity order, or how similar two task IDs look. Two tasks that merely ran close together in time are two roots, not parent and child.
+
+For a quick summary, use each participant's `state` (`"finished"`, `"running"`, or `"unknown"`) rather than the raw `status`, and report `"unknown"` honestly instead of guessing that a task finished.
+
+Report `UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings if present rather than hiding them — they describe a projection that recorded a parent that does not resolve, or contradictory parentage, and the affected participants are correctly reported as roots with no path.
+
+On a participant-heavy thread, bound the view instead of loading everything:
+
+```bash
+t3-session participants THREAD_ID --turn TURN_ID --format jsonl
+```
+
+`--turn`, `--turn-limit`, or `--limit` keep the response small; real threads have been observed with 261 distinct tasks.
+
+### A thread with no participants
+
+An empty `participants` array means no `task.*` activities were projected for that thread — normal for a thread with no subagent or background work. Report that plainly rather than implying something failed or was lost.
+
+### A tree that is unexpectedly flat
+
+`hierarchyAvailable: false` means the projection never recorded an explicit parent for any participant. Do not reconstruct nesting from timestamps, activity order, or task ID similarity — report the flat list and say hierarchy is unavailable for this thread.
+
+### A participant stuck in `running`
+
+A participant reported with `state: "running"` may simply have ended without a terminal status ever being projected, rather than still being active. Cross-check the thread's `liveState.complete` (Increment 2) before claiming an agent is still working — if `liveState.complete` is `true`, the thread has settled even if a participant's `state` still reads `"running"`.
+
 ## Partial provider history
 
 A raw provider file can contain valid records, empty lines, unsupported labels, or malformed JSON. Keep valid record order, include the warning details, and state that the raw stream is partial. Do not treat token usage or delta events as a replacement for projected messages when the SQLite projection is available.

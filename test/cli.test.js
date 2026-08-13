@@ -10,6 +10,14 @@ import { fileURLToPath } from "node:url";
 import { main, parseCliArgs } from "../src/cli.js";
 import { deleteThread } from "./fixtures/live-fixture.js";
 import {
+  BROKEN_THREAD_ID as PARTICIPANT_BROKEN_THREAD_ID,
+  DELETED_THREAD_ID as PARTICIPANT_DELETED_THREAD_ID,
+  EMPTY_THREAD_ID as PARTICIPANT_EMPTY_THREAD_ID,
+  FLAT_THREAD_ID as PARTICIPANT_FLAT_THREAD_ID,
+  TREE_THREAD_ID as PARTICIPANT_TREE_THREAD_ID,
+  createParticipantFixture,
+} from "./fixtures/participant-fixture.js";
+import {
   ACTIVE_THREAD_ID,
   NULL_FIELD_PROJECT_THREAD_ID,
   NULL_UPDATED_THREAD_ID,
@@ -128,6 +136,7 @@ test("parses get options before and after the command", () => {
     turn: undefined,
     turnLimit: undefined,
     turnOffset: undefined,
+    tree: false,
     rawJsonl: true,
     once: false,
     interval: undefined,
@@ -532,6 +541,7 @@ test("parses list options before and after the command", () => {
     turn: undefined,
     turnLimit: undefined,
     turnOffset: undefined,
+    tree: false,
     rawJsonl: false,
     once: false,
     interval: undefined,
@@ -569,6 +579,7 @@ test("tail parses its options before and after the command", () => {
     turn: undefined,
     turnLimit: "2",
     turnOffset: undefined,
+    tree: false,
     rawJsonl: false,
     once: true,
     interval: "500",
@@ -1361,6 +1372,343 @@ test("a thread deleted mid-tail ends with reason thread-not-found and exit code 
     }));
     const error = parseErrorFromStderr(spawned.getStderr());
     assert.equal(error.code, "THREAD_NOT_FOUND");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+const jsonlSchemaPath = path.join(projectRoot, "schemas", "jsonl-record.v1.json");
+const jsonlRecordSchema = JSON.parse(fs.readFileSync(jsonlSchemaPath, "utf8"));
+const participantsSchemaPath = path.join(projectRoot, "schemas", "participants.v1.json");
+const participantsSchema = JSON.parse(fs.readFileSync(participantsSchemaPath, "utf8"));
+
+function assertValidParticipantsEnvelope(view) {
+  for (const key of participantsSchema.required) {
+    assert.ok(Object.hasOwn(view, key), `missing required key "${key}"`);
+  }
+  for (const key of Object.keys(view)) {
+    assert.ok(Object.hasOwn(participantsSchema.properties, key), `unexpected key "${key}"`);
+  }
+  const participantSchema = participantsSchema.$defs.participant;
+  const walk = (participant) => {
+    for (const key of participantSchema.required) {
+      assert.ok(Object.hasOwn(participant, key), `missing participant key "${key}"`);
+    }
+    for (const key of Object.keys(participant)) {
+      assert.ok(Object.hasOwn(participantSchema.properties, key), `unexpected participant key "${key}"`);
+    }
+    assert.ok(participantSchema.properties.state.enum.includes(participant.state));
+    for (const child of participant.children || []) {
+      walk(child);
+    }
+  };
+  view.participants.forEach(walk);
+}
+
+test("participants parses its options before and after the command", () => {
+  assert.deepEqual(parseCliArgs([
+    "--db", "/tmp/state.sqlite",
+    "participants", PARTICIPANT_TREE_THREAD_ID,
+    "--tree", "--format", "json", "--limit", "5", "--reverse",
+  ]), {
+    command: "participants",
+    args: [PARTICIPANT_TREE_THREAD_ID],
+    home: undefined,
+    db: "/tmp/state.sqlite",
+    format: "json",
+    title: undefined,
+    project: undefined,
+    since: undefined,
+    before: undefined,
+    limit: "5",
+    offset: undefined,
+    reverse: true,
+    lastTurn: false,
+    turn: undefined,
+    turnLimit: undefined,
+    turnOffset: undefined,
+    tree: true,
+    rawJsonl: false,
+    once: false,
+    interval: undefined,
+    maxCycles: undefined,
+    timeout: undefined,
+    help: false,
+    version: false,
+  });
+});
+
+test("participants --format json emits a valid participants.v1 envelope", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--format", "json", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const view = JSON.parse(result.stdout);
+    assert.equal(view.schemaVersion, "t3-session.participants.v1");
+    assert.equal(view.participants.length, 3);
+    assert.equal(view.hierarchyAvailable, false);
+    assertValidParticipantsEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --format jsonl emits a header record and one record per participant", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const records = result.stdout.trimEnd().split("\n").map((line) => JSON.parse(line));
+    for (const record of records) {
+      for (const key of jsonlRecordSchema.required) {
+        assert.ok(Object.hasOwn(record, key), `missing required key "${key}"`);
+      }
+      assert.ok(jsonlRecordSchema.properties.recordType.enum.includes(record.recordType));
+    }
+    assert.equal(records[0].recordType, "participants");
+    assert.equal(records[0].data.counts.total, 3);
+    assert.deepEqual(records.slice(1).map((r) => r.recordType), ["participant", "participant", "participant"]);
+    assert.deepEqual(
+      records.slice(1).map((r) => r.data.taskId),
+      ["task-alpha", "task-beta", "task-gamma"],
+    );
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants human output states plainly that the list is flat", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /flat list/i);
+    assert.match(result.stdout, /Alpha task/);
+    assert.match(result.stdout, /Gamma task/);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --tree nests explicit children", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_TREE_THREAD_ID, "--tree", "--format", "json",
+      "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    const view = JSON.parse(result.stdout);
+    assert.equal(view.hierarchyAvailable, true);
+    assert.equal(view.participants.length, 2);
+    const root = view.participants.find((p) => p.taskId === "root-task");
+    assert.equal(root.children.length, 2);
+    const child = root.children.find((p) => p.taskId === "child-task");
+    assert.equal(child.children.length, 1);
+    assert.equal(child.children[0].taskId, "grandchild-task");
+    assertValidParticipantsEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --tree is rejected with --format jsonl and accepted otherwise", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const rejected = runCli(fixture, [
+      "participants", PARTICIPANT_TREE_THREAD_ID, "--tree", "--format", "jsonl",
+      "--db", fixture.databasePath,
+    ]);
+    assert.equal(rejected.status, 3);
+    assert.equal(parseError(rejected).code, "INVALID_ARGUMENTS");
+
+    for (const format of ["human", "json"]) {
+      const accepted = runCli(fixture, [
+        "participants", PARTICIPANT_TREE_THREAD_ID, "--tree", "--format", format,
+        "--db", fixture.databasePath,
+      ]);
+      assert.equal(accepted.status, 0, format);
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --turn bounds the view and reports the selection", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--turn", "pturn-2", "--format", "json",
+      "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    const view = JSON.parse(result.stdout);
+    assert.deepEqual(view.participants.map((p) => p.taskId), ["task-gamma"]);
+    assert.equal(view.selection.kind, "turn");
+    assert.equal(view.selection.turnId, "pturn-2");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --limit, --offset, and --reverse page and order the view", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const page = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--limit", "1", "--offset", "1",
+      "--format", "json", "--db", fixture.databasePath,
+    ]);
+    assert.equal(page.status, 0);
+    const paged = JSON.parse(page.stdout);
+    assert.equal(paged.counts.total, 3);
+    assert.equal(paged.counts.participants, 1);
+    assert.deepEqual(paged.participants.map((p) => p.taskId), ["task-beta"]);
+
+    const reversed = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--reverse", "--format", "json",
+      "--db", fixture.databasePath,
+    ]);
+    assert.deepEqual(
+      JSON.parse(reversed.stdout).participants.map((p) => p.taskId),
+      ["task-gamma", "task-beta", "task-alpha"],
+    );
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants rejects list-only filters, tail options, --title, and --raw-jsonl", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const rejected = [
+      ["--title", "topic"],
+      ["--raw-jsonl"],
+      ["--project", "Participant project"],
+      ["--since", "2026-03-01"],
+      ["--before", "2026-03-09"],
+      ["--once"],
+      ["--interval", "500"],
+      ["--max-cycles", "2"],
+      ["--timeout", "1000"],
+    ];
+
+    for (const args of rejected) {
+      const result = runCli(fixture, [
+        "participants", PARTICIPANT_FLAT_THREAD_ID, ...args, "--db", fixture.databasePath,
+      ]);
+      assert.equal(result.status, 3, args.join(" "));
+      assert.equal(parseError(result).code, "INVALID_ARGUMENTS", args.join(" "));
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants rejects an unsupported format and a wrong argument count", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const badFormat = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--format", "xml", "--db", fixture.databasePath,
+    ]);
+    assert.equal(badFormat.status, 3);
+    assert.equal(parseError(badFormat).code, "INVALID_ARGUMENTS");
+
+    const noArgs = runCli(fixture, ["participants", "--db", fixture.databasePath]);
+    assert.equal(noArgs.status, 3);
+
+    const twoArgs = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, PARTICIPANT_TREE_THREAD_ID,
+      "--db", fixture.databasePath,
+    ]);
+    assert.equal(twoArgs.status, 3);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants treats missing and soft-deleted threads as not found", () => {
+  const fixture = createParticipantFixture();
+  try {
+    for (const threadId of ["missing-participant-thread", PARTICIPANT_DELETED_THREAD_ID]) {
+      const result = runCli(fixture, [
+        "participants", threadId, "--format", "json", "--db", fixture.databasePath,
+      ]);
+      assert.equal(result.status, 2, threadId);
+      assert.equal(result.stdout, "", threadId);
+      assert.equal(parseError(result).code, "THREAD_NOT_FOUND", threadId);
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("a thread with no task activities returns an empty envelope rather than an error", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_EMPTY_THREAD_ID, "--format", "json", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const view = JSON.parse(result.stdout);
+    assert.deepEqual(view.participants, []);
+    assert.equal(view.counts.total, 0);
+    assert.equal(view.hierarchyAvailable, false);
+    assertValidParticipantsEnvelope(view);
+
+    const human = runCli(fixture, [
+      "participants", PARTICIPANT_EMPTY_THREAD_ID, "--db", fixture.databasePath,
+    ]);
+    assert.equal(human.status, 0);
+    assert.match(human.stdout, /No task participants/i);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants surfaces unresolved-parent and cycle warnings without failing", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_BROKEN_THREAD_ID, "--format", "json", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    const view = JSON.parse(result.stdout);
+    const codes = view.warnings.map((warning) => warning.code);
+    assert.ok(codes.includes("UNRESOLVED_PARENT"));
+    assert.ok(codes.includes("PARENT_CYCLE"));
+    assert.equal(view.hierarchyAvailable, false);
+    assertValidParticipantsEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("--help documents participants and every Increment 3 option", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, ["--help"]);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /participants <thread-id>/);
+    assert.match(result.stdout, /--tree/);
+    assert.match(result.stdout, /--turn-limit <n>/);
+    assert.match(result.stdout, /--offset <n>/);
+    assert.match(result.stdout, /--reverse/);
   } finally {
     cleanupFixture(fixture);
   }

@@ -1,6 +1,6 @@
 ---
 name: "t3-session"
-description: "Use when a T3 Code conversation thread must be recovered from the local read-only projection by exact thread ID, listed or filtered as a candidate, searched by title, diagnosed, inspected through provider JSONL, read as a bounded window of recent turns, checked for live/complete state, or followed with a bounded tail while it is still active."
+description: "Use when a T3 Code conversation thread must be recovered from the local read-only projection by exact thread ID, listed or filtered as a candidate, searched by title, diagnosed, inspected through provider JSONL, read as a bounded window of recent turns, checked for live/complete state, followed with a bounded tail while it is still active, or inspected for the task participants (and any explicit hierarchy) that worked on it."
 ---
 
 # T3 Session Skill
@@ -45,6 +45,16 @@ Every `get` result carries a `liveState` object, and a thread can be actively ch
 6. Report interruption, retry diagnostics, and partial reads honestly. If a tail ends with reason `"interrupt"`, stops after `--max-cycles` or `--timeout`, or hit retried database errors, say so — do not present a partial tail as a complete transcript.
 7. Do not use provider JSONL to determine live state. The SQLite projection is canonical for `liveState`, and `tail` never opens the provider log.
 
+## Thread participants
+
+1. Use `t3-session participants THREAD_ID` to answer "who worked on this thread," instead of guessing participants from message text or tool activity.
+2. Read `hierarchyAvailable` before presenting any tree. State plainly that hierarchy is unavailable when it is `false` — this is the common case for real threads, not a failure.
+3. Never present a flat list as a hierarchy, and never claim one agent invoked another unless `parentTaskId` is populated. Hierarchy comes only from an explicit, resolvable `parentAgentId`; it is never inferred from timestamps, order, or identifier shape.
+4. Prefer `state` over the raw `status` for a quick answer, and report `"unknown"` honestly rather than guessing that a task finished.
+5. Report `UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings rather than hiding them.
+6. Bound the view with `--turn`, `--turn-limit`, or `--limit` on participant-heavy threads — real threads have been observed with 261 distinct tasks.
+7. Combine `participants` with `liveState` when a thread is still active: a participant in `state: "running"` on a settled thread (`liveState.complete: true`) usually means the task ended without a terminal status being projected, not that it is still executing.
+
 ## Safe defaults
 
 - Retrieval is read-only.
@@ -76,6 +86,12 @@ t3-session get THREAD_ID --format json
 t3-session get THREAD_ID --raw-jsonl
 t3-session find --title "project topic" --format json
 t3-session doctor --format json
+```
+
+```bash
+t3-session participants THREAD_ID --format json
+t3-session participants THREAD_ID --tree --format json
+t3-session participants THREAD_ID --turn TURN_ID --format jsonl
 ```
 
 If history is missing, malformed, or only partially available, preserve the CLI warning or error and say what was unavailable. Do not reconstruct a complete conversation from token deltas when a normalized SQLite projection is present.
