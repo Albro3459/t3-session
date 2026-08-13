@@ -68,95 +68,63 @@ function assertDeclaredType(value, propertySchema, label) {
   );
 }
 
-// Recursively validates a participant (and, for --tree output, its nested children)
-// against the schema's participant definition, the same way live-state.test.js and
-// output-ordering.test.js hand-roll schema conformance without a JSON-schema dependency.
-// Beyond required/unexpected keys, this now enforces the declared type of every field, so a
-// wrong-typed value (eg. a numeric taskId, or a non-boolean isBackgrounded) fails here rather
-// than only being caught by a field-specific assertion elsewhere.
-function assertValidParticipant(participant, participantSchema) {
-  for (const key of participantSchema.required) {
-    assert.ok(Object.hasOwn(participant, key), `participant missing required key "${key}"`);
+function resolveSchema(schema) {
+  if (schema && typeof schema.$ref === "string") {
+    return participantsSchema.$defs[schema.$ref.replace("#/$defs/", "")];
   }
-  for (const key of Object.keys(participant)) {
-    assert.ok(
-      Object.hasOwn(participantSchema.properties, key),
-      `participant has unexpected key "${key}"`,
-    );
+  return schema;
+}
+
+// A general walk over the subset of JSON Schema that participants.v1.json actually uses:
+// type unions, const, enum, minimum, required, additionalProperties, array items, and $ref.
+// Walking the schema rather than hand-listing each field means a property added to the schema
+// is enforced automatically, instead of silently going unchecked until someone remembers it.
+// The alternative would be a JSON-schema dependency, which this package does not take.
+function assertMatchesSchema(value, rawSchema, label) {
+  const schema = resolveSchema(rawSchema);
+
+  if (Object.hasOwn(schema, "const")) {
+    assert.equal(value, schema.const, `${label} must equal ${JSON.stringify(schema.const)}`);
   }
-  for (const [key, propertySchema] of Object.entries(participantSchema.properties)) {
-    if (key === "children" || !Object.hasOwn(participant, key)) {
-      continue;
+  if (schema.type !== undefined) {
+    assertDeclaredType(value, schema, label);
+  }
+  if (schema.enum !== undefined) {
+    assert.ok(schema.enum.includes(value), `${label} outside enum: ${JSON.stringify(value)}`);
+  }
+  if (schema.minimum !== undefined && typeof value === "number") {
+    assert.ok(value >= schema.minimum, `${label} below minimum ${schema.minimum}`);
+  }
+  if (Array.isArray(value) && schema.items !== undefined) {
+    value.forEach((item, index) => assertMatchesSchema(item, schema.items, `${label}[${index}]`));
+  }
+
+  const isPlainObject = typeof value === "object" && value !== null && !Array.isArray(value);
+  if (!isPlainObject || schema.properties === undefined) {
+    return;
+  }
+
+  for (const key of schema.required ?? []) {
+    assert.ok(Object.hasOwn(value, key), `${label} missing required key "${key}"`);
+  }
+  if (schema.additionalProperties === false) {
+    for (const key of Object.keys(value)) {
+      assert.ok(Object.hasOwn(schema.properties, key), `${label} has unexpected key "${key}"`);
     }
-    assertDeclaredType(participant[key], propertySchema, `participant.${key}`);
   }
-  assert.ok(
-    participantSchema.properties.state.enum.includes(participant.state),
-    `unexpected state "${participant.state}"`,
-  );
-
-  const usageSchema = participantSchema.properties.usage;
-  for (const key of usageSchema.required) {
-    assert.ok(Object.hasOwn(participant.usage, key), `usage missing required key "${key}"`);
-  }
-  for (const key of Object.keys(participant.usage)) {
-    assert.ok(Object.hasOwn(usageSchema.properties, key), `usage has unexpected key "${key}"`);
-  }
-  for (const [key, propertySchema] of Object.entries(usageSchema.properties)) {
-    assertDeclaredType(participant.usage[key], propertySchema, `participant.usage.${key}`);
-  }
-
-  if (Object.hasOwn(participant, "children")) {
-    for (const child of participant.children) {
-      assertValidParticipant(child, participantSchema);
+  for (const [key, propertySchema] of Object.entries(schema.properties)) {
+    if (Object.hasOwn(value, key)) {
+      assertMatchesSchema(value[key], propertySchema, `${label}.${key}`);
     }
   }
 }
 
+function assertValidParticipant(participant, participantSchema) {
+  assertMatchesSchema(participant, participantSchema, "participant");
+}
+
 function assertValidEnvelope(envelope) {
-  for (const key of participantsSchema.required) {
-    assert.ok(Object.hasOwn(envelope, key), `envelope missing required key "${key}"`);
-  }
-  for (const key of Object.keys(envelope)) {
-    assert.ok(
-      Object.hasOwn(participantsSchema.properties, key),
-      `envelope has unexpected key "${key}"`,
-    );
-  }
-  for (const key of participantsSchema.properties.counts.required) {
-    assert.ok(Object.hasOwn(envelope.counts, key), `counts missing required key "${key}"`);
-  }
-  for (const key of Object.keys(envelope.counts)) {
-    assert.ok(
-      Object.hasOwn(participantsSchema.properties.counts.properties, key),
-      `counts has unexpected key "${key}"`,
-    );
-  }
-  for (const [key, propertySchema] of Object.entries(participantsSchema.properties.counts.properties)) {
-    assertDeclaredType(envelope.counts[key], propertySchema, `counts.${key}`);
-  }
-  assert.equal(envelope.schemaVersion, participantsSchema.properties.schemaVersion.const);
-  assert.ok(
-    participantsSchema.properties.ordering.properties.direction.enum.includes(envelope.ordering.direction),
-    `unexpected ordering.direction "${envelope.ordering.direction}"`,
-  );
-  assert.equal(envelope.ordering.sortBy, participantsSchema.properties.ordering.properties.sortBy.const);
-
-  const warningSchema = participantsSchema.$defs.warning;
-  for (const warning of envelope.warnings) {
-    for (const key of warningSchema.required) {
-      assert.ok(Object.hasOwn(warning, key), `warning missing required key "${key}"`);
-    }
-    for (const [key, propertySchema] of Object.entries(warningSchema.properties)) {
-      if (Object.hasOwn(warning, key)) {
-        assertDeclaredType(warning[key], propertySchema, `warning.${key}`);
-      }
-    }
-  }
-
-  for (const participant of envelope.participants) {
-    assertValidParticipant(participant, participantsSchema.$defs.participant);
-  }
+  assertMatchesSchema(envelope, participantsSchema, "envelope");
 }
 
 // Guards the validator itself. Without this, a weakened assertValidEnvelope would silently
@@ -186,6 +154,33 @@ test("the envelope validator rejects the schema violations it exists to catch", 
       },
       "ordering.direction outside the enum": (envelope) => {
         envelope.ordering.direction = "sideways";
+      },
+      "non-boolean hierarchyAvailable": (envelope) => {
+        envelope.hierarchyAvailable = "true";
+      },
+      "non-string threadId": (envelope) => {
+        envelope.threadId = 12345;
+      },
+      "non-string toolVersion": (envelope) => {
+        envelope.toolVersion = 2;
+      },
+      "negative depth below the declared minimum": (envelope) => {
+        envelope.participants[0].depth = -5;
+      },
+      "non-string element inside turnIds": (envelope) => {
+        envelope.participants[0].turnIds = [42];
+      },
+      "selection replaced by an array": (envelope) => {
+        envelope.selection = ["nope"];
+      },
+      "selection.kind outside the enum": (envelope) => {
+        envelope.selection = { kind: "not-a-real-kind" };
+      },
+      "non-string selection.turnId": (envelope) => {
+        envelope.selection = { kind: "turn", turnId: 42 };
+      },
+      "unexpected key at envelope level": (envelope) => {
+        envelope.surprise = true;
       },
     };
 
