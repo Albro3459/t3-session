@@ -9,7 +9,7 @@
     "schemaVersion": { "const": "t3-session.jsonl-record.v1" },
     "recordType": {
       "type": "string",
-      "enum": ["thread", "turn", "message", "activity", "list"]
+      "enum": ["thread", "turn", "message", "activity", "list", "participants", "participant"]
     },
     "threadId": { "type": ["string", "null"] },
     "data": { "type": "object" },

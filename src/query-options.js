@@ -138,6 +138,18 @@ export function normalizeTailOptions(options = {}) {
   });
 }
 
+// limit defaults to null, meaning every participant. A silent default cap would answer
+// "who worked on this thread" with a truncated list, which is worse than a long one.
+export function normalizeParticipantOptions(options = {}) {
+  return Object.freeze({
+    selection: normalizeTurnSelection(options),
+    reverse: normalizeFlag(options.reverse, "reverse"),
+    tree: normalizeFlag(options.tree, "tree"),
+    limit: normalizeCount(options.limit, "limit", null),
+    offset: normalizeCount(options.offset, "offset", 0),
+  });
+}
+
 export function normalizeTurnSelection(options = {}) {
   const lastTurn = normalizeFlag(options.lastTurn, "lastTurn");
   const hasWindow = options.turnLimit !== undefined || options.turnOffset !== undefined;

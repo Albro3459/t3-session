@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://t3-session.dev/schemas/participants.v1.json",
+  "title": "t3-session thread participants",
+  "description": "A flat view of the task participants in one thread, folded from explicit task.* activities. Hierarchy is present only where the projection explicitly recorded a resolvable parent; it is never inferred from timestamps, activity order, or identifier shape. Check hierarchyAvailable before presenting a tree.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "toolVersion",
+    "threadId",
+    "ordering",
+    "selection",
+    "counts",
+    "hierarchyAvailable",
+    "participants",
+    "warnings"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "t3-session.participants.v1" },
+    "toolVersion": { "type": "string" },
+    "threadId": { "type": ["string", "null"] },
+    "ordering": {
+      "type": "object",
+      "required": ["sortBy", "direction"],
+      "properties": {
+        "sortBy": { "const": "firstSeenAt" },
+        "direction": { "type": "string", "enum": ["asc", "desc"] }
+      },
+      "additionalProperties": false
+    },
+    "selection": {
+      "description": "Null for a whole-thread read; otherwise the turn window the participants were restricted to.",
+      "type": ["object", "null"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["turn", "turn-window"] },
+        "turnId": { "type": ["string", "null"] },
+        "turnLimit": { "type": ["integer", "null"] },
+        "turnOffset": { "type": ["integer", "null"] },
+        "totalTurns": { "type": ["integer", "null"] },
+        "selectedTurnIds": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "counts": {
+      "type": "object",
+      "required": ["total", "participants", "roots", "withExplicitParent", "unresolvedParents"],
+      "properties": {
+        "total": {
+          "description": "Participants matching before --limit and --offset, so truncation is detectable.",
+          "type": "integer"
+        },
+        "participants": { "type": "integer" },
+        "roots": { "type": "integer" },
+        "withExplicitParent": { "type": "integer" },
+        "unresolvedParents": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+    "hierarchyAvailable": {
+      "description": "True only when at least one participant has a resolved parentTaskId. False is the common, correct answer for most threads and is not a failure.",
+      "type": "boolean"
+    },
+    "participants": {
+      "description": "A flat array by default. With tree output, only roots appear here and descendants are nested under children.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/participant" }
+    },
+    "warnings": { "type": "array", "items": { "$ref": "#/$defs/warning" } }
+  },
+  "$defs": {
+    "participant": {
+      "type": "object",
+      "required": [
+        "taskId",
+        "parentTaskId",
+        "path",
+        "depth",
+        "title",
+        "role",
+        "model",
+        "agentKind",
+        "taskType",
+        "effort",
+        "status",
+        "state",
+        "summary",
+        "detail",
+        "error",
+        "toolUseId",
+        "lastToolName",
+        "workflowName",
+        "outputFile",
+        "isBackgrounded",
+        "turnId",
+        "turnIds",
+        "firstSeenAt",
+        "lastSeenAt",
+        "activityCount",
+        "usage"
+      ],
+      "properties": {
+        "taskId": { "type": "string" },
+        "parentTaskId": {
+          "description": "Populated only from an explicit, resolvable parentAgentId. Null otherwise, including when a recorded parent did not resolve.",
+          "type": ["string", "null"]
+        },
+        "path": {
+          "description": "A dotted path such as main.subagent1.subagent1a, present only when the entire ancestry to a root is explicitly known. Null when any ancestor is unresolved or cyclic.",
+          "type": ["string", "null"]
+        },
+        "depth": { "type": "integer", "minimum": 0 },
+        "title": { "type": ["string", "null"] },
+        "role": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "agentKind": { "type": ["string", "null"] },
+        "taskType": { "type": ["string", "null"] },
+        "effort": { "type": ["string", "null"] },
+        "status": { "type": ["string", "null"] },
+        "state": {
+          "description": "finished when status is terminal, running when a non-terminal or unrecognised status was recorded, unknown when no status was ever projected.",
+          "type": "string",
+          "enum": ["finished", "running", "unknown"]
+        },
+        "summary": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] },
+        "toolUseId": { "type": ["string", "null"] },
+        "lastToolName": { "type": ["string", "null"] },
+        "workflowName": { "type": ["string", "null"] },
+        "outputFile": { "type": ["string", "null"] },
+        "isBackgrounded": { "type": ["boolean", "null"] },
+        "turnId": { "type": ["string", "null"] },
+        "turnIds": { "type": "array", "items": { "type": "string" } },
+        "firstSeenAt": { "type": ["string", "null"] },
+        "lastSeenAt": { "type": ["string", "null"] },
+        "activityCount": { "type": "integer" },
+        "usage": {
+          "type": "object",
+          "required": ["totalTokens", "toolUses", "durationMs"],
+          "properties": {
+            "totalTokens": { "type": ["number", "null"] },
+            "toolUses": { "type": ["number", "null"] },
+            "durationMs": { "type": ["number", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "adapterSpecific": { "type": "object" },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/participant" } }
+      },
+      "additionalProperties": false
+    },
+    "warning": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "field": { "type": "string" },
+        "message": { "type": "string" },
+        "details": { "type": "object" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

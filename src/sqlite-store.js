@@ -6,6 +6,7 @@ import {
   SchemaUnavailableError,
   ThreadNotFoundError,
 } from "./errors.js";
+import { TASK_ACTIVITY_KINDS } from "./participants.js";
 import { normalizeListOptions } from "./query-options.js";
 
 export const READ_TIMEOUT_MS = 250;
@@ -131,6 +132,41 @@ const TURN_COUNT_QUERY = `
   FROM projection_turns
   WHERE thread_id = ?
 `;
+
+// Placeholders are generated from the frozen kind list's length; no value is interpolated.
+const TASK_KIND_PLACEHOLDERS = TASK_ACTIVITY_KINDS.map(() => "?").join(", ");
+
+const PARTICIPANT_ACTIVITIES_QUERY = `
+  SELECT
+    activity_id,
+    thread_id,
+    turn_id,
+    kind,
+    payload_json,
+    created_at,
+    sequence
+  FROM projection_thread_activities
+  WHERE thread_id = ? AND kind IN (${TASK_KIND_PLACEHOLDERS})
+  ORDER BY (created_at IS NULL) ASC, created_at, sequence, activity_id
+`;
+
+function buildParticipantActivitiesByTurnQuery(turnCount) {
+  return `
+    SELECT
+      activity_id,
+      thread_id,
+      turn_id,
+      kind,
+      payload_json,
+      created_at,
+      sequence
+    FROM projection_thread_activities
+    WHERE thread_id = ?
+      AND kind IN (${TASK_KIND_PLACEHOLDERS})
+      AND turn_id IN (${Array.from({ length: turnCount }, () => "?").join(", ")})
+    ORDER BY (created_at IS NULL) ASC, created_at, sequence, activity_id
+  `;
+}
 
 function buildTurnWindowQuery() {
   return `
@@ -468,6 +504,80 @@ function uniqueIds(values) {
   return [...new Set(values.filter((value) => value !== null && value !== undefined))];
 }
 
+// Shared by bounded thread retrieval and the bounded participant view so both windows mean
+// exactly the same thing.
+function selectTurnRows(database, threadId, selection) {
+  return selection.kind === "turn"
+    ? queryAll(database, TURN_BY_ID_QUERY, [threadId, selection.turnId], "turns")
+    : queryAll(
+        database,
+        buildTurnWindowQuery(),
+        [threadId, selection.turnLimit, selection.turnOffset],
+        "turns",
+      );
+}
+
+export function retrieveParticipantActivityRows(database, threadId, selection = null) {
+  const thread = queryAll(database, THREAD_QUERY, threadId, "thread")[0];
+  if (!thread) {
+    throw new ThreadNotFoundError(threadId);
+  }
+
+  if (selection === null || selection === undefined) {
+    return {
+      thread,
+      activities: queryAll(
+        database,
+        PARTICIPANT_ACTIVITIES_QUERY,
+        [threadId, ...TASK_ACTIVITY_KINDS],
+        "participant activities",
+      ),
+      selection: null,
+    };
+  }
+
+  const turns = selectTurnRows(database, threadId, selection);
+  const totalTurns = queryAll(database, TURN_COUNT_QUERY, threadId, "turn count")[0].count;
+  const turnIds = uniqueIds(turns.map((turn) => turn.turn_id));
+  const activities = turnIds.length === 0
+    ? []
+    : queryAll(
+        database,
+        buildParticipantActivitiesByTurnQuery(turnIds.length),
+        [threadId, ...TASK_ACTIVITY_KINDS, ...turnIds],
+        "participant activities",
+      );
+
+  return {
+    thread,
+    activities,
+    selection: {
+      kind: selection.kind,
+      turnId: selection.turnId ?? null,
+      turnLimit: selection.turnLimit ?? null,
+      turnOffset: selection.turnOffset ?? null,
+      totalTurns,
+      selectedTurnIds: turnIds,
+    },
+  };
+}
+
+export function readParticipantActivitiesFromDatabase(databasePath, threadId, selection = null) {
+  const database = openReadonlyDatabase(databasePath);
+  let transactionStarted = false;
+  try {
+    database.exec("BEGIN DEFERRED");
+    transactionStarted = true;
+    validateRequiredTables(database);
+    return retrieveParticipantActivityRows(database, threadId, selection);
+  } finally {
+    if (transactionStarted) {
+      database.exec("ROLLBACK");
+    }
+    database.close();
+  }
+}
+
 export function retrieveThreadWindowRows(database, threadId, selection) {
   const thread = queryAll(database, THREAD_QUERY, threadId, "thread")[0];
   if (!thread) {
@@ -476,14 +586,7 @@ export function retrieveThreadWindowRows(database, threadId, selection) {
 
   const totalTurns = queryAll(database, TURN_COUNT_QUERY, threadId, "turn count")[0].count;
 
-  const turns = selection.kind === "turn"
-    ? queryAll(database, TURN_BY_ID_QUERY, [threadId, selection.turnId], "turns")
-    : queryAll(
-        database,
-        buildTurnWindowQuery(),
-        [threadId, selection.turnLimit, selection.turnOffset],
-        "turns",
-      );
+  const turns = selectTurnRows(database, threadId, selection);
 
   const turnIds = uniqueIds(turns.map((turn) => turn.turn_id));
   const messageIds = uniqueIds(turns.flatMap((turn) => [turn.pending_message_id, turn.assistant_message_id]));

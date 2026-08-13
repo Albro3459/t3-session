@@ -7,15 +7,18 @@ import {
   normalizeThreadList,
   normalizeThreadSearchResult,
 } from "./normalize.js";
+import { normalizeParticipants } from "./participants.js";
 import { readProviderJsonl } from "./provider-jsonl.js";
 import {
   normalizeListOptions,
+  normalizeParticipantOptions,
   normalizeTailOptions,
   normalizeTurnSelection,
 } from "./query-options.js";
 import {
   findThreadsFromDatabase,
   listThreadRowsFromDatabase,
+  readParticipantActivitiesFromDatabase,
   readThreadFromDatabase,
   readThreadWindowFromDatabase,
 } from "./sqlite-store.js";
@@ -68,6 +71,21 @@ export async function createT3SessionClient(options = {}) {
         sleep: requestOptions.sleep,
         onDiagnostic: requestOptions.onDiagnostic,
         readCycle: requestOptions.readCycle,
+      });
+    },
+    async listParticipants(threadId, requestOptions = {}) {
+      validateThreadId(threadId);
+      const participantOptions = normalizeParticipantOptions(requestOptions);
+      const databasePath = requestOptions.db || requestOptions.stateDb || config.stateDb;
+      const rows = readParticipantActivitiesFromDatabase(
+        databasePath,
+        threadId,
+        participantOptions.selection,
+      );
+      return normalizeParticipants(rows, {
+        toolVersion: VERSION,
+        threadId,
+        options: participantOptions,
       });
     },
     async listThreads(requestOptions = {}) {
@@ -133,6 +151,14 @@ export {
   TERMINAL_TURN_STATES,
 } from "./normalize.js";
 export {
+  buildParticipantTree,
+  isTerminalTaskStatus,
+  normalizeParticipants,
+  PARTICIPANTS_SCHEMA_VERSION,
+  TASK_ACTIVITY_KINDS,
+  TERMINAL_TASK_STATUSES,
+} from "./participants.js";
+export {
   DEFAULT_LIST_LIMIT,
   DEFAULT_TAIL_INTERVAL_MS,
   DEFAULT_TURN_LIMIT,
@@ -140,6 +166,7 @@ export {
   MIN_TAIL_INTERVAL_MS,
   normalizeCount,
   normalizeListOptions,
+  normalizeParticipantOptions,
   normalizeProjectFilter,
   normalizeTailOptions,
   normalizeTimestamp,
@@ -177,10 +204,12 @@ export {
   listTables,
   listThreadRowsFromDatabase,
   openReadonlyDatabase,
+  readParticipantActivitiesFromDatabase,
   readThreadCycleFromDatabase,
   readThreadFromDatabase,
   readThreadWindowFromDatabase,
   retrieveLiveStateRows,
+  retrieveParticipantActivityRows,
   retrieveThreadListRows,
   retrieveThreadRows,
   retrieveThreadSearchRows,
