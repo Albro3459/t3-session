@@ -60,6 +60,8 @@ Implement after Increment 2 is complete and reviewed:
 
 The current projection exposes task IDs and task metadata but does not reliably expose parent task IDs, so a flat view is the safe initial target for this increment.
 
+Implementation details and acceptance criteria are in `TODO/INCREMENT-3-PLAN.md`.
+
 ## Agent implementation protocol
 
 For implementation work, use one to three Sonnet 5 medium subagents at a time. The main agent owns orchestration, task decomposition, reasoning, integration decisions, and final review.
