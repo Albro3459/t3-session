@@ -353,6 +353,30 @@ test("a thread deleted mid-tail ends with reason thread-not-found and exit code 
   }
 });
 
+test("a thread missing on the first cycle throws without emitting an end record", async () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const tail = client.tailThread("missing-thread-0001", { once: true });
+
+    const records = [];
+    let caughtError = null;
+    try {
+      for await (const record of tail) {
+        records.push(record);
+      }
+    } catch (error) {
+      caughtError = error;
+    }
+
+    assert.ok(caughtError instanceof ThreadNotFoundError);
+    assert.equal(caughtError.exitCode, 2);
+    assert.deepEqual(records, []);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
 test("three consecutive transient failures are retried with diagnostics and the fourth is fatal", async () => {
   const fixture = createFixtureDatabase();
   try {

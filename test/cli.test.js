@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { parseCliArgs } from "../src/cli.js";
+import { main, parseCliArgs } from "../src/cli.js";
+import { deleteThread } from "./fixtures/live-fixture.js";
 import {
   ACTIVE_THREAD_ID,
   NULL_FIELD_PROJECT_THREAD_ID,
@@ -36,6 +38,51 @@ function runCli(fixture, args) {
   });
 }
 
+// Event-driven process spawn for interruption and streaming tests. Never rely on real
+// elapsed time here: react to the child's first stdout data or to its exit event, not to
+// a sleep.
+function spawnCli(fixture, args) {
+  const child = spawn(process.execPath, [executable, ...args], {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      T3_HOME: path.join(fixture.directory, "home"),
+    },
+  });
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+
+  const exited = new Promise((resolve) => {
+    child.on("exit", (code, signal) => resolve({ code, signal }));
+  });
+
+  return {
+    child,
+    exited,
+    getStdout: () => stdout,
+    getStderr: () => stderr,
+  };
+}
+
+function onFirstStdoutData(spawned, callback) {
+  let fired = false;
+  spawned.child.stdout.on("data", () => {
+    if (!fired) {
+      fired = true;
+      callback();
+    }
+  });
+}
+
 function writeProviderLog(fixture, content, threadId = ACTIVE_THREAD_ID) {
   const directory = path.join(fixture.directory, "home", "userdata", "logs", "provider");
   fs.mkdirSync(directory, { recursive: true });
@@ -48,6 +95,14 @@ function parseError(result) {
   assert.equal(result.stdout, "");
   assert.notEqual(result.stderr, "");
   return JSON.parse(result.stderr);
+}
+
+// A tail can write retry diagnostics before its fatal error, so the failure is the last
+// stderr line rather than the whole stream.
+function parseErrorFromStderr(stderr) {
+  const lines = stderr.trimEnd().split("\n").filter(Boolean);
+  assert.notEqual(lines.length, 0);
+  return JSON.parse(lines.at(-1));
 }
 
 test("parses get options before and after the command", () => {
@@ -74,6 +129,10 @@ test("parses get options before and after the command", () => {
     turnLimit: undefined,
     turnOffset: undefined,
     rawJsonl: true,
+    once: false,
+    interval: undefined,
+    maxCycles: undefined,
+    timeout: undefined,
     help: false,
     version: false,
   });
@@ -474,6 +533,47 @@ test("parses list options before and after the command", () => {
     turnLimit: undefined,
     turnOffset: undefined,
     rawJsonl: false,
+    once: false,
+    interval: undefined,
+    maxCycles: undefined,
+    timeout: undefined,
+    help: false,
+    version: false,
+  });
+});
+
+test("tail parses its options before and after the command", () => {
+  assert.deepEqual(parseCliArgs([
+    "--db", "/tmp/state.sqlite",
+    "--once",
+    "tail", ACTIVE_THREAD_ID,
+    "--interval", "500",
+    "--max-cycles", "5",
+    "--timeout", "30000",
+    "--turn-limit", "2",
+    "--format", "jsonl",
+  ]), {
+    command: "tail",
+    args: [ACTIVE_THREAD_ID],
+    home: undefined,
+    db: "/tmp/state.sqlite",
+    format: "jsonl",
+    title: undefined,
+    project: undefined,
+    since: undefined,
+    before: undefined,
+    limit: undefined,
+    offset: undefined,
+    reverse: false,
+    lastTurn: false,
+    turn: undefined,
+    turnLimit: "2",
+    turnOffset: undefined,
+    rawJsonl: false,
+    once: true,
+    interval: "500",
+    maxCycles: "5",
+    timeout: "30000",
     help: false,
     version: false,
   });
@@ -827,6 +927,440 @@ test("--help documents list, get turn-window, and find ordering options", () => 
     ]) {
       assert.ok(result.stdout.includes(token), `expected help to document ${token}`);
     }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail --once --format json emits a single JSON array of baseline records and one end record", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--once", "--format", "json", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const records = JSON.parse(result.stdout);
+    assert.ok(Array.isArray(records));
+    assert.ok(records.every((record) => record.schemaVersion === "t3-session.tail-record.v1"));
+    assert.equal(records.filter((record) => record.recordType === "thread").length, 1);
+    assert.equal(records.filter((record) => record.recordType === "turn").length, 2);
+    assert.equal(records.filter((record) => record.recordType === "message").length, 2);
+    assert.equal(records.filter((record) => record.recordType === "activity").length, 2);
+    const endRecords = records.filter((record) => record.op === "end");
+    assert.equal(endRecords.length, 1);
+    assert.equal(endRecords[0].data.reason, "once");
+    assert.equal(records.at(-1).op, "end");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail --once --format jsonl streams tail-record.v1 lines ending with the end record", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--once", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const lines = result.stdout.trimEnd().split("\n");
+    const records = lines.map((line) => JSON.parse(line));
+    assert.ok(records.every((record) => record.schemaVersion === "t3-session.tail-record.v1"));
+    assert.equal(records.at(-1).op, "end");
+    assert.equal(records.at(-1).data.reason, "once");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail --format json is rejected for an unbounded tail", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--format", "json", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 3);
+    assert.equal(result.stdout, "");
+    assert.equal(parseError(result).code, "INVALID_ARGUMENTS");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail --format human is rejected", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--once", "--format", "human", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 3);
+    assert.equal(parseError(result).code, "INVALID_ARGUMENTS");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail rejects mutually exclusive --once combinations with exit code 3", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    for (const args of [
+      ["tail", ACTIVE_THREAD_ID, "--once", "--interval", "500"],
+      ["tail", ACTIVE_THREAD_ID, "--once", "--max-cycles", "2"],
+      ["tail", ACTIVE_THREAD_ID, "--once", "--timeout", "1000"],
+    ]) {
+      const result = runCli(fixture, [...args, "--db", fixture.databasePath]);
+      assert.equal(result.status, 3, args.join(" "));
+      assert.equal(parseError(result).code, "INVALID_ARGUMENTS", args.join(" "));
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail --interval bounds are enforced", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const tooLow = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--interval", "99", "--max-cycles", "1", "--db", fixture.databasePath,
+    ]);
+    assert.equal(tooLow.status, 3);
+    assert.equal(parseError(tooLow).code, "INVALID_ARGUMENTS");
+
+    const tooHigh = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--interval", "60001", "--max-cycles", "1", "--db", fixture.databasePath,
+    ]);
+    assert.equal(tooHigh.status, 3);
+    assert.equal(parseError(tooHigh).code, "INVALID_ARGUMENTS");
+
+    const low = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--interval", "100", "--max-cycles", "1", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+    assert.equal(low.status, 0, low.stderr);
+    assert.equal(low.stderr, "");
+
+    const high = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--interval", "60000", "--max-cycles", "1", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+    assert.equal(high.status, 0, high.stderr);
+    assert.equal(high.stderr, "");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail rejects non-integer or non-positive --max-cycles and --timeout", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    for (const args of [
+      ["tail", ACTIVE_THREAD_ID, "--max-cycles", "0"],
+      ["tail", ACTIVE_THREAD_ID, "--max-cycles", "-1"],
+      ["tail", ACTIVE_THREAD_ID, "--max-cycles", "abc"],
+      ["tail", ACTIVE_THREAD_ID, "--timeout", "0"],
+      ["tail", ACTIVE_THREAD_ID, "--timeout", "-5"],
+      ["tail", ACTIVE_THREAD_ID, "--timeout", "abc"],
+    ]) {
+      const result = runCli(fixture, [...args, "--db", fixture.databasePath]);
+      assert.equal(result.status, 3, args.join(" "));
+      assert.equal(parseError(result).code, "INVALID_ARGUMENTS", args.join(" "));
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail rejects list-only options, --title, and --raw-jsonl", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    for (const args of [
+      ["tail", ACTIVE_THREAD_ID, "--project", "x"],
+      ["tail", ACTIVE_THREAD_ID, "--since", "2026-01-01T00:00:00Z"],
+      ["tail", ACTIVE_THREAD_ID, "--before", "2026-01-01T00:00:00Z"],
+      ["tail", ACTIVE_THREAD_ID, "--limit", "1"],
+      ["tail", ACTIVE_THREAD_ID, "--offset", "1"],
+      ["tail", ACTIVE_THREAD_ID, "--reverse"],
+      ["tail", ACTIVE_THREAD_ID, "--title", "foo"],
+      ["tail", ACTIVE_THREAD_ID, "--raw-jsonl"],
+    ]) {
+      const result = runCli(fixture, [...args, "--once", "--db", fixture.databasePath]);
+      assert.equal(result.status, 3, args.join(" "));
+      assert.equal(parseError(result).code, "INVALID_ARGUMENTS", args.join(" "));
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail rejects --last-turn, --turn, and --turn-offset but allows --turn-limit", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    for (const args of [
+      ["tail", WINDOW_THREAD_ID, "--last-turn"],
+      ["tail", WINDOW_THREAD_ID, "--turn", "wturn-1"],
+      ["tail", WINDOW_THREAD_ID, "--turn-offset", "1"],
+    ]) {
+      const result = runCli(fixture, [...args, "--once", "--db", fixture.databasePath]);
+      assert.equal(result.status, 3, args.join(" "));
+      assert.equal(parseError(result).code, "INVALID_ARGUMENTS", args.join(" "));
+    }
+
+    const allowed = runCli(fixture, [
+      "tail", WINDOW_THREAD_ID, "--once", "--turn-limit", "1", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.equal(allowed.stderr, "");
+    const records = allowed.stdout.trimEnd().split("\n").map((line) => JSON.parse(line));
+    const turnRecords = records.filter((record) => record.recordType === "turn");
+    assert.equal(turnRecords.length, 1);
+    assert.equal(turnRecords[0].data.turnId, "wturn-3");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// The tail engine (src/tail.js, not owned by this file) always yields exactly one end
+// record before throwing ThreadNotFoundError, whether the thread was missing from the very
+// first cycle or disappeared mid-tail: there is no special case for "never existed". A CLI
+// that honors the streaming contract (write each record the instant it is yielded) will
+// therefore always surface that single end record on stdout before the process exits 2,
+// even for a thread that was never there. This intentionally mirrors the mid-tail deletion
+// test below rather than reproducing get's "nothing on stdout" behavior byte-for-byte.
+// A thread missing at startup is a plain retrieval failure, so it matches get exactly:
+// exit 2 with nothing on stdout. Only a thread that disappears mid-tail gets an end record.
+test("tail on a missing thread at startup exits 2 with nothing on stdout, exactly like get", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "tail", "missing-thread-0001", "--once", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 2);
+    assert.equal(result.stdout, "");
+    const error = parseErrorFromStderr(result.stderr);
+    assert.equal(error.code, "THREAD_NOT_FOUND");
+
+    const getResult = runCli(fixture, [
+      "get", "missing-thread-0001", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+    assert.equal(getResult.status, result.status);
+    assert.equal(getResult.stdout, result.stdout);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail --once keeps stderr empty for machine-readable formats", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    for (const format of ["jsonl", "json"]) {
+      const result = runCli(fixture, [
+        "tail", ACTIVE_THREAD_ID, "--once", "--format", format, "--db", fixture.databasePath,
+      ]);
+      assert.equal(result.status, 0, format);
+      assert.equal(result.stderr, "", format);
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("tail never opens the provider log", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    writeProviderLog(fixture, "{ not valid json\n");
+    const result = runCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--once", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stdout.toLowerCase(), /provider.?log/);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("--help documents tail and every Increment 2 option", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, ["--help"]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    for (const pattern of [/tail <thread-id>/, /--once/, /--interval/, /--max-cycles/, /--timeout/]) {
+      assert.match(result.stdout, pattern);
+    }
+    assert.match(result.stdout, /--turn-limit <n>\s+Bound each poll to the newest n turns/);
+    assert.match(result.stdout, /--format jsonl\|json\s+jsonl is the default; json requires a bounded tail/);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("SIGINT emits exactly one end record and exits 0", async () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const spawned = spawnCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--interval", "100", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+
+    onFirstStdoutData(spawned, () => {
+      spawned.child.kill("SIGINT");
+    });
+
+    const { code } = await spawned.exited;
+
+    assert.equal(code, 0);
+    const lines = spawned.getStdout().trimEnd().split("\n").filter(Boolean);
+    const records = lines.map((line) => JSON.parse(line));
+    const endRecords = records.filter((record) => record.op === "end");
+    assert.equal(endRecords.length, 1);
+    assert.equal(endRecords[0].data.reason, "interrupt");
+    assert.doesNotMatch(spawned.getStderr(), /\n\s+at /);
+    assert.doesNotMatch(spawned.getStderr(), /Error:/);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// A closed pipe is only observable by writing into it, and the baseline of an idle thread
+// fits entirely in the pipe buffer, so this run stops at --max-cycles rather than at the
+// moment head exits. What it proves is the important part: no unhandled EPIPE, no stack
+// trace, clean exit. The in-process test below drives the EPIPE branch itself.
+test("a broken pipe exits quietly without an unhandled EPIPE error", async () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const cli = spawn(process.execPath, [
+      executable,
+      "tail", ACTIVE_THREAD_ID, "--interval", "100", "--max-cycles", "5", "--format", "jsonl",
+      "--db", fixture.databasePath,
+    ], {
+      cwd: projectRoot,
+      env: { ...process.env, T3_HOME: path.join(fixture.directory, "home") },
+    });
+    cli.stdout.setEncoding("utf8");
+    cli.stderr.setEncoding("utf8");
+
+    let stderr = "";
+    cli.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+
+    const head = spawn("head", ["-n", "2"]);
+    head.stdout.resume();
+    head.stdin.on("error", () => {});
+    cli.stdout.pipe(head.stdin);
+    head.on("close", () => {
+      cli.stdout.destroy();
+    });
+
+    const { code } = await new Promise((resolve) => {
+      cli.on("exit", (exitCode, signal) => resolve({ code: exitCode, signal }));
+    });
+
+    assert.doesNotMatch(stderr, /EPIPE/);
+    assert.doesNotMatch(stderr, /\n\s+at /);
+    assert.ok(code === 0 || code === null, `expected a clean exit, got code=${code}`);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// Deterministic counterpart to the spawned pipeline above: stdout reports EPIPE partway
+// through the baseline, so the tail must stop writing, abort, and resolve 0 without ever
+// reaching a real poll interval.
+test("an EPIPE from stdout aborts an unbounded tail and exits 0", async () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const stdout = new EventEmitter();
+    stdout.destroyed = false;
+    stdout.chunks = [];
+    stdout.write = (chunk) => {
+      if (stdout.destroyed) {
+        return false;
+      }
+      stdout.chunks.push(chunk);
+      if (stdout.chunks.length === 3) {
+        stdout.destroyed = true;
+        queueMicrotask(() => {
+          stdout.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+        });
+      }
+      return true;
+    };
+
+    let stderrOutput = "";
+    const stderr = { write: (chunk) => { stderrOutput += chunk; } };
+
+    const exitCode = await main([
+      "tail", ACTIVE_THREAD_ID, "--interval", "100", "--format", "jsonl",
+      "--db", fixture.databasePath,
+    ], { stdout, stderr });
+
+    assert.equal(exitCode, 0);
+    assert.equal(stderrOutput, "");
+    assert.equal(stdout.chunks.length, 3);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("three consecutive transient database failures retry with diagnostics and the fourth exits 4", async () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const spawned = spawnCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--interval", "100", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+
+    onFirstStdoutData(spawned, () => {
+      fs.rmSync(fixture.databasePath, { force: true });
+      fs.rmSync(`${fixture.databasePath}-wal`, { force: true });
+      fs.rmSync(`${fixture.databasePath}-shm`, { force: true });
+    });
+
+    const { code } = await spawned.exited;
+
+    assert.equal(code, 4);
+    const lines = spawned.getStderr().trimEnd().split("\n").filter(Boolean);
+    const diagnostics = lines.map((line) => JSON.parse(line));
+    assert.equal(diagnostics.length, 4);
+    for (const diagnostic of diagnostics) {
+      assert.equal(diagnostic.schemaVersion, "t3-session.error.v1");
+      assert.equal(diagnostic.code, "DATABASE_UNAVAILABLE");
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("a thread deleted mid-tail ends with reason thread-not-found and exit code 2", async () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const spawned = spawnCli(fixture, [
+      "tail", ACTIVE_THREAD_ID, "--interval", "100", "--format", "jsonl", "--db", fixture.databasePath,
+    ]);
+
+    onFirstStdoutData(spawned, () => {
+      deleteThread(fixture.databasePath, ACTIVE_THREAD_ID);
+    });
+
+    const { code } = await spawned.exited;
+
+    assert.equal(code, 2);
+    const lines = spawned.getStdout().trimEnd().split("\n").filter(Boolean);
+    const lastRecord = JSON.parse(lines.at(-1));
+    assert.equal(lastRecord.op, "end");
+    assert.equal(lastRecord.data.reason, "thread-not-found");
+    assert.ok(lines.every((line) => {
+      JSON.parse(line);
+      return true;
+    }));
+    const error = parseErrorFromStderr(spawned.getStderr());
+    assert.equal(error.code, "THREAD_NOT_FOUND");
   } finally {
     cleanupFixture(fixture);
   }

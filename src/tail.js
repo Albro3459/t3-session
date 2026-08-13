@@ -195,7 +195,12 @@ export async function* tailThreadRecords(threadId, {
       }
     } catch (error) {
       if (error instanceof ThreadNotFoundError) {
-        yield endRecord("thread-not-found");
+        // A thread that disappears mid-tail ends the stream with a reason. A thread that was
+        // already missing on the first cycle is a plain startup failure and must behave
+        // exactly like get: the error only, nothing on stdout.
+        if (cycle > 1) {
+          yield endRecord("thread-not-found");
+        }
         throw error;
       }
 

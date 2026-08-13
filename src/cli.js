@@ -11,6 +11,7 @@ import {
 } from "./errors.js";
 import { doctorExitCode, formatDoctorHuman } from "./doctor.js";
 import { createT3SessionClient } from "./index.js";
+import { normalizeTailOptions } from "./query-options.js";
 import { installBundledSkill } from "./skill-install.js";
 import { formatBundledSchema } from "./schema.js";
 import {
@@ -28,9 +29,10 @@ import {
 
 export const VERSION = packageMetadata.version;
 
-const COMMANDS = ["list", "get", "find", "doctor", "schema", "install"];
-const STORAGE_COMMANDS = new Set(["list", "get", "find", "doctor"]);
+const COMMANDS = ["list", "get", "tail", "find", "doctor", "schema", "install"];
+const STORAGE_COMMANDS = new Set(["list", "get", "tail", "find", "doctor"]);
 const FORMATS = new Set(["human", "json", "jsonl"]);
+const TAIL_FORMATS = new Set(["jsonl", "json"]);
 
 const LIST_FILTER_OPTIONS = [
   { key: "project", option: "--project", kind: "value" },
@@ -49,6 +51,9 @@ const TURN_OPTIONS = [
   { key: "turnLimit", option: "--turn-limit", kind: "value" },
   { key: "turnOffset", option: "--turn-offset", kind: "value" },
 ];
+// tail reuses the turn-window machinery for --turn-limit but has no notion of an exact
+// turn or a last-turn shortcut, so every other turn-selection option is rejected.
+const TAIL_REJECTED_TURN_OPTIONS = TURN_OPTIONS.filter((def) => def.key !== "turnLimit");
 
 function isOptionSet(options, def) {
   return def.kind === "flag" ? options[def.key] === true : options[def.key] !== undefined;
@@ -97,6 +102,10 @@ export function parseCliArgs(argv = []) {
     turnLimit: undefined,
     turnOffset: undefined,
     rawJsonl: false,
+    once: false,
+    interval: undefined,
+    maxCycles: undefined,
+    timeout: undefined,
     help: false,
     version: false,
   };
@@ -201,6 +210,29 @@ export function parseCliArgs(argv = []) {
       continue;
     }
 
+    if (value === "--once") {
+      result.once = true;
+      continue;
+    }
+
+    if (value === "--interval") {
+      result.interval = requireOptionValue(argv, index, "--interval");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--max-cycles") {
+      result.maxCycles = requireOptionValue(argv, index, "--max-cycles");
+      index += 1;
+      continue;
+    }
+
+    if (value === "--timeout") {
+      result.timeout = requireOptionValue(argv, index, "--timeout");
+      index += 1;
+      continue;
+    }
+
     if (value === "--") {
       result.args.push(...argv.slice(index + 1));
       break;
@@ -258,6 +290,13 @@ export function formatHelp() {
     "    --turn <turn-id>       Retrieve one exact turn and its records",
     "    --turn-limit <n>       Retrieve a bounded window of turns from the newest side",
     "    --turn-offset <n>      Skip turns from the newest side before --turn-limit",
+    "  tail <thread-id>        Follow a thread by polling the read-only projection",
+    "    --once                 Poll once, emit the result, and exit",
+    "    --interval <ms>        Poll interval in milliseconds; default 1000; 100-60000",
+    "    --max-cycles <n>       Stop after n poll cycles",
+    "    --timeout <ms>         Stop after a wall-clock duration",
+    "    --turn-limit <n>       Bound each poll to the newest n turns",
+    "    --format jsonl|json    jsonl is the default; json requires a bounded tail",
     "  find --title <text>     Find threads by title",
     "    --format json          Emit normalized search results",
     "    --reverse              Sort newest-first instead of oldest-first",
@@ -413,6 +452,139 @@ async function handleGet(options) {
   return { output: formatThreadHuman(thread) };
 }
 
+// tail streams t3-session.tail-record.v1 records straight to the provided stream rather
+// than returning an `output` string, because the run can be unbounded and can end by
+// throwing (thread-not-found, database-unavailable). Writing as records arrive, instead of
+// buffering everything into a return value, is what makes SIGINT and broken-pipe handling
+// possible.
+async function handleTail(options) {
+  const args = options.args || [];
+  if (options.title !== undefined) {
+    throw new InvalidArgumentsError("--title is only supported by find.", {
+      command: "tail",
+      option: "--title",
+    });
+  }
+
+  if (options.rawJsonl) {
+    throw new InvalidArgumentsError("--raw-jsonl is only supported by get.", {
+      command: "tail",
+      option: "--raw-jsonl",
+    });
+  }
+
+  rejectOptions(options, "tail", LIST_ONLY_OPTIONS);
+  rejectOptions(options, "tail", TAIL_REJECTED_TURN_OPTIONS);
+
+  const unknownOption = args.find((argument) => argument.startsWith("-"));
+  if (unknownOption) {
+    throw new InvalidArgumentsError(`Unknown option: ${unknownOption}`, {
+      command: "tail",
+      option: unknownOption,
+    });
+  }
+
+  if (args.length !== 1) {
+    throw new InvalidArgumentsError("tail requires exactly one thread ID.", {
+      command: "tail",
+      expected: "<thread-id>",
+    });
+  }
+
+  const format = options.format || "jsonl";
+  if (!TAIL_FORMATS.has(format)) {
+    throw new InvalidArgumentsError(`Unsupported output format for tail: ${format}.`, {
+      command: "tail",
+      format,
+      supportedFormats: [...TAIL_FORMATS],
+    });
+  }
+
+  const tailOptions = normalizeTailOptions({
+    once: options.once,
+    intervalMs: options.interval,
+    maxCycles: options.maxCycles,
+    timeoutMs: options.timeout,
+    turnLimit: options.turnLimit,
+  });
+
+  if (format === "json" && !tailOptions.bounded) {
+    throw new InvalidArgumentsError(
+      "--format json requires --once, --max-cycles, or --timeout because an unbounded tail never finishes.",
+      { command: "tail", format },
+    );
+  }
+
+  const stdout = options.io?.stdout || process.stdout;
+  const stderr = options.io?.stderr || process.stderr;
+  const canListenStdout = typeof stdout.on === "function";
+
+  const config = options.config || resolveConfig(options);
+  const client = await createT3SessionClient({ home: config.home, db: config.stateDb });
+
+  const controller = new AbortController();
+  let brokenPipe = false;
+  function onStdoutError(error) {
+    if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED") {
+      brokenPipe = true;
+      controller.abort();
+    }
+  }
+  // Left attached for the rest of the process. A failed write reports EPIPE asynchronously,
+  // so detaching this when the loop ends would let the last write crash the process with an
+  // unhandled error event instead of exiting quietly.
+  if (canListenStdout) {
+    stdout.on("error", onStdoutError);
+  }
+
+  // The EPIPE event can arrive a tick after the write that caused it, so also treat an
+  // already-destroyed stream as closed rather than writing into it again.
+  function writableClosed() {
+    return brokenPipe || stdout.destroyed === true || stdout.writableEnded === true;
+  }
+
+  function onSigint() {
+    controller.abort();
+  }
+  process.on("SIGINT", onSigint);
+
+  const buffered = format === "json" ? [] : null;
+
+  try {
+    // Forward the raw values, not the normalized ones: tailThread validates again, and a
+    // resolved default interval would look like an explicit --interval next to --once.
+    for await (const record of client.tailThread(args[0], {
+      once: options.once,
+      intervalMs: options.interval,
+      maxCycles: options.maxCycles,
+      timeoutMs: options.timeout,
+      turnLimit: options.turnLimit,
+      signal: controller.signal,
+      onDiagnostic: (diagnostic) => {
+        if (!writableClosed()) {
+          writeLine(stderr, JSON.stringify(diagnostic));
+        }
+      },
+    })) {
+      if (writableClosed()) {
+        continue;
+      }
+      if (buffered) {
+        buffered.push(record);
+      } else {
+        writeLine(stdout, JSON.stringify(record));
+      }
+    }
+  } finally {
+    if (buffered && !writableClosed()) {
+      writeLine(stdout, JSON.stringify(buffered, null, 2));
+    }
+    process.off("SIGINT", onSigint);
+  }
+
+  return { exitCode: 0 };
+}
+
 async function handleFind(options) {
   const args = options.args || [];
   if (typeof options.title !== "string" || options.title.trim() === "") {
@@ -543,7 +715,7 @@ async function handleSchema(options) {
   if (options.args.length !== 1 || options.args[0].startsWith("-")) {
     throw new InvalidArgumentsError("schema requires exactly one schema name.", {
       command: "schema",
-      expected: "schema <thread.v1|error.v1|jsonl-record.v1|list.v1>",
+      expected: "schema <thread.v1|error.v1|jsonl-record.v1|list.v1|tail-record.v1>",
     });
   }
 
@@ -584,6 +756,7 @@ async function notImplemented(options) {
 const commandHandlers = new Map(COMMANDS.map((command) => [command, notImplemented]));
 commandHandlers.set("list", handleList);
 commandHandlers.set("get", handleGet);
+commandHandlers.set("tail", handleTail);
 commandHandlers.set("find", handleFind);
 commandHandlers.set("doctor", handleDoctor);
 commandHandlers.set("schema", handleSchema);
@@ -621,7 +794,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     }
 
     const config = STORAGE_COMMANDS.has(options.command) ? resolveConfig(options) : undefined;
-    const result = await dispatchCommand({ ...options, config });
+    const result = await dispatchCommand({ ...options, config, io: { stdout, stderr } });
     if (result?.output !== undefined) {
       stdout.write(result.output);
     }
