@@ -9,11 +9,16 @@ import {
   DatabaseUnavailableError,
   InvalidArgumentsError,
   listThreadRowsFromDatabase,
+  readParticipantActivitiesFromDatabase,
   readThreadWindowFromDatabase,
   SchemaUnavailableError,
   ThreadNotFoundError,
   VERSION,
 } from "../src/index.js";
+import {
+  FLAT_THREAD_ID as PARTICIPANT_FLAT_THREAD_ID,
+  createParticipantFixture,
+} from "./fixtures/participant-fixture.js";
 import {
   ACTIVE_THREAD_ID,
   DELETED_PROJECT_TWO_THREAD_ID,
@@ -705,6 +710,55 @@ test("production reads do not modify the database", async () => {
   }
 });
 
+test("participant reads do not modify the database, unbounded or turn-bounded", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const before = fs.statSync(fixture.databasePath);
+
+    const unbounded = readParticipantActivitiesFromDatabase(
+      fixture.databasePath,
+      PARTICIPANT_FLAT_THREAD_ID,
+      null,
+    );
+    assert.ok(unbounded.activities.length > 0);
+
+    const bounded = readParticipantActivitiesFromDatabase(
+      fixture.databasePath,
+      PARTICIPANT_FLAT_THREAD_ID,
+      { kind: "turn-window", turnLimit: 1, turnOffset: 0 },
+    );
+    assert.ok(bounded.activities.length > 0);
+
+    const after = fs.statSync(fixture.databasePath);
+    assert.equal(after.size, before.size);
+    assert.equal(after.mtimeMs, before.mtimeMs);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// Matches the pattern in "distinguishes an unavailable schema from a missing thread": a
+// dropped required table can only surface as SCHEMA_UNAVAILABLE if the read runs
+// validateRequiredTables inside its own BEGIN DEFERRED / ROLLBACK transaction rather than
+// trusting a cached schema.
+test("readParticipantActivitiesFromDatabase runs the read-only deferred-transaction path", () => {
+  const fixture = createParticipantFixture();
+  const database = new DatabaseSync(fixture.databasePath);
+  database.exec("DROP TABLE projection_turns");
+  database.close();
+
+  try {
+    assert.throws(
+      () => readParticipantActivitiesFromDatabase(fixture.databasePath, PARTICIPANT_FLAT_THREAD_ID, null),
+      (error) => error instanceof SchemaUnavailableError
+        && error.code === "SCHEMA_UNAVAILABLE"
+        && error.details.missingTables.includes("projection_turns"),
+    );
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
 test("findThreads is oldest-first by default and reverse: true flips it", async () => {
   const fixture = createFixtureDatabase();
   try {
@@ -745,6 +799,69 @@ test("findThreads is oldest-first by default and reverse: true flips it", async 
     database.close();
     const percentMatches = await client.findThreads({ title: "100%", reverse: true });
     assert.deepEqual(percentMatches.map((match) => match.id), ["reverse-percent-thread-0001"]);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// A task.* activity with a NULL turn_id can never satisfy a turn-bounded query's
+// "turn_id IN (...)" clause, because SQL NULL never matches IN. That is deliberate and
+// matches how get's turn windows already behave; this pins it as an asserted property.
+test("a participant whose activities all have a null turn_id is excluded from every turn-bounded window", () => {
+  const fixture = createFixtureDatabase();
+  const threadId = "null-turn-participant-thread-0001";
+  try {
+    const database = new DatabaseSync(fixture.databasePath);
+    database.prepare(`
+      INSERT INTO projection_threads (thread_id, project_id, title, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      threadId,
+      "project-1",
+      "Null-turn participant thread",
+      "2026-04-01T00:00:00.000Z",
+      "2026-04-01T00:05:00.000Z",
+      null,
+    );
+
+    const turn = database.prepare(`
+      INSERT INTO projection_turns (thread_id, turn_id, state, requested_at, started_at, completed_at)
+      VALUES (?, ?, 'completed', ?, ?, ?)
+    `);
+    turn.run(
+      threadId, "nt-turn-1",
+      "2026-04-01T00:00:10.000Z", "2026-04-01T00:00:11.000Z", "2026-04-01T00:00:59.000Z",
+    );
+    turn.run(
+      threadId, "nt-turn-2",
+      "2026-04-01T00:01:10.000Z", "2026-04-01T00:01:11.000Z", "2026-04-01T00:01:59.000Z",
+    );
+
+    database.prepare(`
+      INSERT INTO projection_thread_activities (
+        activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
+      ) VALUES (?, ?, NULL, 'info', 'task.started', NULL, ?, ?, ?)
+    `).run(
+      "ghost-1",
+      threadId,
+      JSON.stringify({ taskId: "ghost-task", title: "Ghost task" }),
+      "2026-04-01T00:00:20.000Z",
+      1,
+    );
+
+    database.close();
+
+    const unbounded = readParticipantActivitiesFromDatabase(fixture.databasePath, threadId, null);
+    assert.deepEqual(unbounded.activities.map((row) => row.activity_id), ["ghost-1"]);
+
+    const bounded = readParticipantActivitiesFromDatabase(fixture.databasePath, threadId, {
+      kind: "turn-window",
+      turnLimit: 2,
+      turnOffset: 0,
+    });
+    assert.equal(bounded.selection.totalTurns, 2);
+    assert.deepEqual(bounded.selection.selectedTurnIds.slice().sort(), ["nt-turn-1", "nt-turn-2"]);
+    assert.deepEqual(bounded.activities, []);
   } finally {
     cleanupFixture(fixture);
   }

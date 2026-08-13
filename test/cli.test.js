@@ -1704,11 +1704,78 @@ test("--help documents participants and every Increment 3 option", () => {
   try {
     const result = runCli(fixture, ["--help"]);
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /participants <thread-id>/);
-    assert.match(result.stdout, /--tree/);
-    assert.match(result.stdout, /--turn-limit <n>/);
-    assert.match(result.stdout, /--offset <n>/);
-    assert.match(result.stdout, /--reverse/);
+    const participantsHelpLines = [
+      "  participants <thread-id>  List the task participants in a thread",
+      "    --tree                 Nest explicit parent/child relationships",
+      "    --last-turn            Only participants whose activities touch the newest turn",
+      "    --turn <turn-id>       Only participants whose activities touch that turn",
+      "    --turn-limit <n>       Only participants touching the newest n turns",
+      "    --turn-offset <n>      Skip turns from the newest side before --turn-limit",
+      "    --limit <n>            Maximum participants returned (no default)",
+      "    --offset <n>           Skip participants before applying --limit",
+      "    --reverse              Newest-first instead of the default oldest-first",
+      "    --format human|json|jsonl",
+    ];
+    for (const line of participantsHelpLines) {
+      assert.ok(result.stdout.includes(line), `missing help line: ${line}`);
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --last-turn scopes to the newest turn and reports the selection", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--last-turn", "--format", "json",
+      "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    const view = JSON.parse(result.stdout);
+    assert.deepEqual(view.participants.map((p) => p.taskId), ["task-gamma"]);
+    assert.equal(view.selection.kind, "turn-window");
+    assert.equal(view.selection.turnLimit, 1);
+    assert.equal(view.selection.turnOffset, 0);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants rejects --last-turn combined with --turn", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--last-turn", "--turn", "pturn-2",
+      "--db", fixture.databasePath,
+    ]);
+    assert.equal(result.status, 3);
+    assert.equal(parseError(result).code, "INVALID_ARGUMENTS");
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --format json and --format jsonl produce clean stdout with empty stderr", () => {
+  const fixture = createParticipantFixture();
+  try {
+    for (const format of ["json", "jsonl"]) {
+      const result = runCli(fixture, [
+        "participants", PARTICIPANT_FLAT_THREAD_ID, "--format", format, "--db", fixture.databasePath,
+      ]);
+      assert.equal(result.status, 0, format);
+      assert.equal(result.stderr, "", format);
+      if (format === "json") {
+        assert.doesNotThrow(() => JSON.parse(result.stdout), format);
+      } else {
+        const lines = result.stdout.trimEnd().split("\n");
+        assert.ok(lines.length > 0, format);
+        for (const line of lines) {
+          assert.doesNotThrow(() => JSON.parse(line), format);
+        }
+      }
+    }
   } finally {
     cleanupFixture(fixture);
   }
