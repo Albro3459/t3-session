@@ -11,6 +11,10 @@ export const TREE_THREAD_ID = "participant-tree-thread";
 export const BROKEN_THREAD_ID = "participant-broken-thread";
 export const EMPTY_THREAD_ID = "participant-empty-thread";
 export const DELETED_THREAD_ID = "participant-deleted-thread";
+export const CYCLE_SCOPE_THREAD_ID = "participant-cycle-scope-thread";
+export const SELF_PARENT_THREAD_ID = "participant-self-parent-thread";
+export const USAGE_FOLD_THREAD_ID = "participant-usage-fold-thread";
+export const TYPE_COERCION_THREAD_ID = "participant-type-coercion-thread";
 
 function taskPayload(values) {
   return JSON.stringify(values);
@@ -113,6 +117,14 @@ export function createParticipantFixture() {
     "2026-03-04T00:00:00.000Z", "2026-03-04T01:00:00.000Z", null);
   thread.run(DELETED_THREAD_ID, "participant-project", "Deleted thread", null,
     "2026-03-05T00:00:00.000Z", "2026-03-05T01:00:00.000Z", "2026-03-05T02:00:00.000Z");
+  thread.run(CYCLE_SCOPE_THREAD_ID, "participant-project", "Cycle scope", null,
+    "2026-03-06T00:00:00.000Z", "2026-03-06T01:00:00.000Z", null);
+  thread.run(SELF_PARENT_THREAD_ID, "participant-project", "Self parent", null,
+    "2026-03-07T00:00:00.000Z", "2026-03-07T01:00:00.000Z", null);
+  thread.run(USAGE_FOLD_THREAD_ID, "participant-project", "Usage folded per field", null,
+    "2026-03-08T00:00:00.000Z", "2026-03-08T01:00:00.000Z", null);
+  thread.run(TYPE_COERCION_THREAD_ID, "participant-project", "Field and identifier typing", null,
+    "2026-03-09T00:00:00.000Z", "2026-03-09T01:00:00.000Z", null);
 
   const turn = database.prepare(`
     INSERT INTO projection_turns (
@@ -221,6 +233,72 @@ export function createParticipantFixture() {
   activity.run("da-1", DELETED_THREAD_ID, null, "task.started", taskPayload({
     taskId: "deleted-thread-task", title: "Deleted",
   }), "2026-03-05T00:00:20.000Z", 1);
+
+  // Cycle-scope thread: A and B form a two-node cycle. C's parentAgentId is A, so C sits
+  // downstream of the cycle without being a member of it -- only A and B may be swept into
+  // PARENT_CYCLE. D has no parent and is an unrelated root.
+  activity.run("cs-1", CYCLE_SCOPE_THREAD_ID, "csturn-1", "task.started", taskPayload({
+    taskId: "A", parentAgentId: "B",
+  }), "2026-03-06T00:00:20.000Z", 1);
+  activity.run("cs-2", CYCLE_SCOPE_THREAD_ID, "csturn-1", "task.started", taskPayload({
+    taskId: "B", parentAgentId: "A",
+  }), "2026-03-06T00:00:21.000Z", 2);
+  activity.run("cs-3", CYCLE_SCOPE_THREAD_ID, "csturn-1", "task.started", taskPayload({
+    taskId: "C", parentAgentId: "A",
+  }), "2026-03-06T00:00:22.000Z", 3);
+  activity.run("cs-4", CYCLE_SCOPE_THREAD_ID, "csturn-1", "task.started", taskPayload({
+    taskId: "D",
+  }), "2026-03-06T00:00:23.000Z", 4);
+
+  // Self-parent thread: a task whose parentAgentId is its own taskId. The identifier
+  // resolves (it names a real participant), so this is a one-node PARENT_CYCLE, not an
+  // UNRESOLVED_PARENT.
+  activity.run("sp-1", SELF_PARENT_THREAD_ID, "spturn-1", "task.started", taskPayload({
+    taskId: "self-parent-task", parentAgentId: "self-parent-task",
+  }), "2026-03-07T00:00:20.000Z", 1);
+
+  // Usage-fold thread: usage is merged per field, not as a whole object, and typedUsage
+  // always wins over usage for a field regardless of which activity reported which.
+  activity.run("uf-1", USAGE_FOLD_THREAD_ID, "ufturn-1", "task.started", taskPayload({
+    taskId: "usage-fold-typed",
+    typedUsage: { totalTokens: 100, toolUses: 5, durationMs: 20 },
+  }), "2026-03-08T00:00:20.000Z", 1);
+  activity.run("uf-2", USAGE_FOLD_THREAD_ID, "ufturn-1", "task.progress", taskPayload({
+    taskId: "usage-fold-typed", typedUsage: { totalTokens: 200 },
+  }), "2026-03-08T00:00:21.000Z", 2);
+  activity.run("uf-3", USAGE_FOLD_THREAD_ID, "ufturn-1", "task.started", taskPayload({
+    taskId: "usage-fold-snake",
+    usage: { total_tokens: 100, tool_uses: 5, duration_ms: 20 },
+  }), "2026-03-08T00:00:22.000Z", 3);
+  activity.run("uf-4", USAGE_FOLD_THREAD_ID, "ufturn-1", "task.progress", taskPayload({
+    taskId: "usage-fold-snake", usage: { total_tokens: 200 },
+  }), "2026-03-08T00:00:23.000Z", 4);
+  // usage (snake_case) arrives first here and typedUsage second, to prove typedUsage still
+  // wins per field no matter which activity came later.
+  activity.run("uf-5", USAGE_FOLD_THREAD_ID, "ufturn-1", "task.started", taskPayload({
+    taskId: "usage-fold-mixed",
+    usage: { total_tokens: 50, tool_uses: 1, duration_ms: 10 },
+  }), "2026-03-08T00:00:24.000Z", 5);
+  activity.run("uf-6", USAGE_FOLD_THREAD_ID, "ufturn-1", "task.progress", taskPayload({
+    taskId: "usage-fold-mixed", typedUsage: { totalTokens: 999 },
+  }), "2026-03-08T00:00:25.000Z", 6);
+
+  // Type-coercion thread: a numeric taskId and a numeric parentAgentId that must still
+  // resolve against it, plus wrong-typed scalars that must be routed to adapterSpecific
+  // instead of breaking the schema, plus a legitimate isBackgrounded: false to prove that
+  // path still preserves a real boolean.
+  activity.run("tc-1", TYPE_COERCION_THREAD_ID, "tcturn-1", "task.started", taskPayload({
+    taskId: 42, title: "Numeric id root",
+  }), "2026-03-09T00:00:20.000Z", 1);
+  activity.run("tc-2", TYPE_COERCION_THREAD_ID, "tcturn-1", "task.started", taskPayload({
+    taskId: "numeric-id-child", parentAgentId: 42,
+  }), "2026-03-09T00:00:21.000Z", 2);
+  activity.run("tc-3", TYPE_COERCION_THREAD_ID, "tcturn-1", "task.started", taskPayload({
+    taskId: "wrong-typed-task", status: 0, title: { a: 1 }, isBackgrounded: "yes",
+  }), "2026-03-09T00:00:22.000Z", 3);
+  activity.run("tc-4", TYPE_COERCION_THREAD_ID, "tcturn-1", "task.started", taskPayload({
+    taskId: "bool-false-task", isBackgrounded: false,
+  }), "2026-03-09T00:00:23.000Z", 4);
 
   database
     .prepare(`
