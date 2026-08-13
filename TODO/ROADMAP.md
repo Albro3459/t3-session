@@ -1,6 +1,6 @@
 # t3-session roadmap
 
-This roadmap separates the next work into three increments. Increment 1 is complete. Increment 2 is not authorized yet.
+This roadmap separates the next work into three increments. Increments 1, 2, and 3 are all complete and implemented.
 
 ## Product constraints
 
