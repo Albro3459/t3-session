@@ -142,6 +142,14 @@ export function createParticipantFixture() {
     "2026-03-02T00:00:10.000Z", "2026-03-02T00:00:11.000Z", "2026-03-02T00:00:59.000Z");
   turn.run(BROKEN_THREAD_ID, "bturn-1", "completed",
     "2026-03-03T00:00:10.000Z", "2026-03-03T00:00:11.000Z", "2026-03-03T00:00:59.000Z");
+  turn.run(CYCLE_SCOPE_THREAD_ID, "csturn-1", "completed",
+    "2026-03-04T00:00:10.000Z", "2026-03-04T00:00:11.000Z", "2026-03-04T00:00:59.000Z");
+  turn.run(SELF_PARENT_THREAD_ID, "spturn-1", "completed",
+    "2026-03-05T00:00:10.000Z", "2026-03-05T00:00:11.000Z", "2026-03-05T00:00:59.000Z");
+  turn.run(USAGE_FOLD_THREAD_ID, "ufturn-1", "completed",
+    "2026-03-06T00:00:10.000Z", "2026-03-06T00:00:11.000Z", "2026-03-06T00:00:59.000Z");
+  turn.run(TYPE_COERCION_THREAD_ID, "tcturn-1", "completed",
+    "2026-03-07T00:00:10.000Z", "2026-03-07T00:00:11.000Z", "2026-03-07T00:00:59.000Z");
 
   const activity = database.prepare(`
     INSERT INTO projection_thread_activities (

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -98,6 +99,9 @@ function assertValidParticipant(participant, participantSchema) {
   for (const key of usageSchema.required) {
     assert.ok(Object.hasOwn(participant.usage, key), `usage missing required key "${key}"`);
   }
+  for (const key of Object.keys(participant.usage)) {
+    assert.ok(Object.hasOwn(usageSchema.properties, key), `usage has unexpected key "${key}"`);
+  }
   for (const [key, propertySchema] of Object.entries(usageSchema.properties)) {
     assertDeclaredType(participant.usage[key], propertySchema, `participant.usage.${key}`);
   }
@@ -131,10 +135,69 @@ function assertValidEnvelope(envelope) {
   for (const [key, propertySchema] of Object.entries(participantsSchema.properties.counts.properties)) {
     assertDeclaredType(envelope.counts[key], propertySchema, `counts.${key}`);
   }
+  assert.equal(envelope.schemaVersion, participantsSchema.properties.schemaVersion.const);
+  assert.ok(
+    participantsSchema.properties.ordering.properties.direction.enum.includes(envelope.ordering.direction),
+    `unexpected ordering.direction "${envelope.ordering.direction}"`,
+  );
+  assert.equal(envelope.ordering.sortBy, participantsSchema.properties.ordering.properties.sortBy.const);
+
+  const warningSchema = participantsSchema.$defs.warning;
+  for (const warning of envelope.warnings) {
+    for (const key of warningSchema.required) {
+      assert.ok(Object.hasOwn(warning, key), `warning missing required key "${key}"`);
+    }
+    for (const [key, propertySchema] of Object.entries(warningSchema.properties)) {
+      if (Object.hasOwn(warning, key)) {
+        assertDeclaredType(warning[key], propertySchema, `warning.${key}`);
+      }
+    }
+  }
+
   for (const participant of envelope.participants) {
     assertValidParticipant(participant, participantsSchema.$defs.participant);
   }
 }
+
+// Guards the validator itself. Without this, a weakened assertValidEnvelope would silently
+// stop protecting every other test that relies on it.
+test("the envelope validator rejects the schema violations it exists to catch", async () => {
+  const fixture = createParticipantFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const valid = await client.listParticipants(FLAT_THREAD_ID);
+    assertValidEnvelope(valid);
+
+    const mutations = {
+      "non-string taskId": (envelope) => {
+        envelope.participants[0].taskId = 42;
+      },
+      "undeclared key inside usage": (envelope) => {
+        envelope.participants[0].usage.cacheReads = 1;
+      },
+      "non-integer depth": (envelope) => {
+        envelope.participants[0].depth = 1.5;
+      },
+      "warning missing its required message": (envelope) => {
+        envelope.warnings.push({ code: "PARENT_CYCLE" });
+      },
+      "wrong schemaVersion": (envelope) => {
+        envelope.schemaVersion = "t3-session.participants.v2";
+      },
+      "ordering.direction outside the enum": (envelope) => {
+        envelope.ordering.direction = "sideways";
+      },
+    };
+
+    for (const [label, mutate] of Object.entries(mutations)) {
+      const broken = structuredClone(valid);
+      mutate(broken);
+      assert.throws(() => assertValidEnvelope(broken), undefined, `validator accepted ${label}`);
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
 
 test("TERMINAL_TASK_STATUSES and TASK_ACTIVITY_KINDS match the plan's frozen constants", () => {
   assert.ok(Object.isFrozen(TERMINAL_TASK_STATUSES));
@@ -750,40 +813,58 @@ test("--tree without paging emits no PARENT_OUT_OF_PAGE warning", async () => {
   }
 });
 
-test("path assignment on a long explicit parent chain is iterative and does not overflow the stack", () => {
-  // Built in-memory rather than through the SQLite fixture: path strings grow quadratically
-  // by design, so this stays well under a size that would exhaust memory while still being
-  // far deeper than any real call stack could recurse through.
-  const chainLength = 1500;
-  const activities = [];
-  for (let index = 0; index <= chainLength; index += 1) {
-    const payload = { taskId: `chain-${index}` };
-    if (index > 0) {
-      payload.parentAgentId = `chain-${index - 1}`;
-    }
-    activities.push({
-      activity_id: `deep-${index}`,
-      thread_id: "deep-chain-thread",
-      turn_id: null,
-      kind: "task.started",
-      payload_json: JSON.stringify(payload),
-      created_at: null,
-      sequence: index,
-    });
-  }
+// Run in a child process with a deliberately small stack. A recursive path walk overflows
+// and exits non-zero at this depth; the iterative walk uses a heap-allocated queue and is
+// unaffected. Running in-process instead would prove nothing: the default stack absorbs a
+// 1500-deep recursion, so the same assertions pass against a recursive implementation.
+const DEEP_CHAIN_LENGTH = 1500;
+const DEEP_CHAIN_STACK_KB = 384;
 
-  const view = normalizeParticipants(
-    { activities, selection: null },
-    {
-      threadId: "deep-chain-thread",
-      options: { reverse: false, tree: false, limit: null, offset: 0 },
-    },
+test("path assignment on a long explicit parent chain does not recurse", () => {
+  const moduleUrl = new URL("../src/participants.js", import.meta.url).href;
+  const script = `
+    import(${JSON.stringify(moduleUrl)}).then(({ normalizeParticipants }) => {
+      const chainLength = ${DEEP_CHAIN_LENGTH};
+      const activities = [];
+      for (let index = 0; index <= chainLength; index += 1) {
+        const payload = { taskId: "chain-" + index };
+        if (index > 0) {
+          payload.parentAgentId = "chain-" + (index - 1);
+        }
+        activities.push({
+          activity_id: "deep-" + index,
+          thread_id: "deep-chain-thread",
+          turn_id: null,
+          kind: "task.started",
+          payload_json: JSON.stringify(payload),
+          created_at: null,
+          sequence: index,
+        });
+      }
+      const view = normalizeParticipants(
+        { activities, selection: null },
+        { threadId: "deep-chain-thread", options: { reverse: false, tree: false, limit: null, offset: 0 } },
+      );
+      const deepest = view.participants.find((p) => p.taskId === "chain-" + chainLength);
+      if (view.participants.length !== chainLength + 1 || !deepest || deepest.depth !== chainLength) {
+        console.error("unexpected fold result");
+        process.exit(1);
+      }
+      console.log("ok");
+    }).catch((error) => {
+      console.error(error && error.message);
+      process.exit(1);
+    });
+  `;
+
+  const result = spawnSync(
+    process.execPath,
+    [`--stack-size=${DEEP_CHAIN_STACK_KB}`, "-e", script],
+    { encoding: "utf8" },
   );
 
-  assert.equal(view.participants.length, chainLength + 1);
-  const deepest = view.participants.find((participant) => participant.taskId === `chain-${chainLength}`);
-  assert.ok(deepest, "expected the deepest chain participant to be present");
-  assert.equal(deepest.depth, chainLength);
+  assert.equal(result.status, 0, `child failed: ${result.stderr}`);
+  assert.equal(result.stdout.trim(), "ok");
 });
 
 test("every fixture thread's envelope, flat and --tree, validates against schemas/participants.v1.json", async () => {
