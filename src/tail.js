@@ -5,6 +5,7 @@ import { normalizeThread } from "./normalize.js";
 import { normalizeTailOptions } from "./query-options.js";
 import { chronologicalThreadEntries } from "./record-order.js";
 import { readThreadCycleFromDatabase } from "./sqlite-store.js";
+import { VERSION } from "./version.js";
 
 export const TAIL_SCHEMA_VERSION = "t3-session.tail-record.v1";
 
@@ -140,7 +141,7 @@ function* runCycle(thread, { threadId, observedAt, cycle, previousState }) {
 export async function* tailThreadRecords(threadId, {
   databasePath,
   tailOptions = normalizeTailOptions({}),
-  toolVersion = "0.1.0",
+  toolVersion = VERSION,
   signal,
   now = Date.now,
   sleep = defaultSleep,

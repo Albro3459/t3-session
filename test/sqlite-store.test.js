@@ -12,6 +12,7 @@ import {
   readThreadWindowFromDatabase,
   SchemaUnavailableError,
   ThreadNotFoundError,
+  VERSION,
 } from "../src/index.js";
 import {
   ACTIVE_THREAD_ID,
@@ -60,7 +61,7 @@ test("retrieves and normalizes a complete thread from SQLite", async () => {
     const thread = await client.getThread(ACTIVE_THREAD_ID);
 
     assert.equal(thread.schemaVersion, "t3-session.thread.v1");
-    assert.equal(thread.toolVersion, "0.1.0");
+    assert.equal(thread.toolVersion, VERSION);
     assert.deepEqual(thread.thread.project, {
       title: "Sanitized project",
       workspaceRoot: "/tmp/sanitized-workspace",

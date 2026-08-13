@@ -1,5 +1,3 @@
-import packageMetadata from "../package.json" with { type: "json" };
-
 import { resolveConfig, resolveProviderLogPath, validateThreadId } from "./config.js";
 import { inspectInstallation } from "./doctor.js";
 import {
@@ -23,8 +21,9 @@ import {
   readThreadWindowFromDatabase,
 } from "./sqlite-store.js";
 import { tailThreadRecords } from "./tail.js";
+import { VERSION } from "./version.js";
 
-export const VERSION = packageMetadata.version;
+export { VERSION };
 
 export async function createT3SessionClient(options = {}) {
   const config = resolveConfig(options);

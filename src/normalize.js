@@ -1,3 +1,5 @@
+import { VERSION } from "./version.js";
+
 const SCHEMA_VERSION = "t3-session.thread.v1";
 const LIST_SCHEMA_VERSION = "t3-session.list.v1";
 
@@ -271,7 +273,7 @@ export function normalizeLiveState(rows, { observedAt } = {}) {
   };
 }
 
-export function normalizeThreadList(rows, { toolVersion = "0.1.0", options, hasMore = false } = {}) {
+export function normalizeThreadList(rows, { toolVersion = VERSION, options, hasMore = false } = {}) {
   const threads = rows.map(normalizeThreadSummary);
 
   return {
@@ -294,7 +296,7 @@ export function normalizeThreadList(rows, { toolVersion = "0.1.0", options, hasM
   };
 }
 
-export function normalizeThread(rows, { toolVersion = "0.1.0", selection, observedAt } = {}) {
+export function normalizeThread(rows, { toolVersion = VERSION, selection, observedAt } = {}) {
   const warnings = [];
   const modelSelection = parseJsonField(
     rows.thread.model_selection_json,
