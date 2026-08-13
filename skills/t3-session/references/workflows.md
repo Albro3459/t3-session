@@ -137,7 +137,7 @@ t3-session participants THREAD_ID --turn TURN_ID --format jsonl
 
 `--last-turn`, `--turn`, `--turn-limit`, or `--limit` keep the response small; real threads have been observed with 261 distinct tasks.
 
-Watch `counts` when paging: `counts.total` is how many participants matched before `--limit`/`--offset`, and `counts.participants` is how many were actually returned in this page, so the two differ exactly when the result was truncated. `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` describe the whole thread regardless of paging. Do not read a whole-thread field like `hierarchyAvailable` as a claim about only what came back in a small page.
+Watch `counts` when paging: `counts.total` is how many participants matched before `--limit`/`--offset`, and `counts.participants` is how many were actually returned in this page, so the two differ exactly when the result was truncated. `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` describe every participant matching the current turn selection before paging, so they do not shrink when `--limit`/`--offset` does. Do not read them as claims about only what came back in a small page — and equally, do not read them as claims about the whole thread when a turn option is in play, since a turn selection narrows what those fields are computed from.
 
 ### A thread with no participants
 
