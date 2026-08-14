@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned only. This document covers Increment 3 from `TODO/ROADMAP.md`:
+Implemented. This document covers Increment 3 from `TODO/ROADMAP.md`:
 
 - a reliable flat participant/task view extracted from explicit task activities;
 - task title, task ID, role, model, status, turn, and tool-use metadata when available;

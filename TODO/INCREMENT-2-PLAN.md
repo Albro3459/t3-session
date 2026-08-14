@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned only. This document covers Increment 2 from `TODO/ROADMAP.md`:
+Implemented. This document covers Increment 2 from `TODO/ROADMAP.md`:
 
 - explicit completeness and live-state metadata on normalized thread output;
 - a read-only `tail` command that polls the SQLite projection;

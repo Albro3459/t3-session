@@ -1,6 +1,6 @@
 # t3-session roadmap
 
-This roadmap separates the next work into three increments. Increments 1, 2, and 3 are all complete and implemented.
+This roadmap separates the next work into three increments. Increments 1, 2, and 3 are all complete and implemented, reviewed in `TODO/V2-REVIEW.md`, and the resulting fix pass is complete (`TODO/V2-FIX-PLAN.md`). All three ship first in `0.2.0`; published `0.1.0` contains none of them.
 
 ## Product constraints
 

@@ -3,6 +3,26 @@
 Derived from `TODO/V2-REVIEW.md` at `ba73e82`. Branch `v2`. Scope: the six review issues, the five
 test-coverage gaps, and the docs/skill pass. Nothing here changes a schema version.
 
+## Status: complete
+
+All four phases landed. 226 tests passing, 0 skipped, 0 todo; `npm run check` clean; `npm pack`
+ships 33 files with `CHANGELOG.md` and no `TODO/` leakage.
+
+- [x] Phase 1 — `f5b1ac6` (issues 1, 3 + gap 2), `8f11ae5` (issue 6 + gap 3)
+- [x] Phase 2 — `bea4d3d` (issue 4 + gap 1), `99882e6` (gaps 4, 5), `9a9e06c` (fixture dedup)
+- [x] Phase 3 — `97f52a2` (issue 2, changelog), `1e25d7b` (issue 5, skill + references),
+      `c05d7fd` (roadmap vocabulary in source comments)
+- [x] Phase 4 — main-agent review, plus `806bae9` (human `participants` output, originally
+      listed as out of scope below and then approved)
+
+Two deviations from the plan as written, both deliberate:
+
+- The "Not in scope" item at the bottom — human `participants` output — was approved during review
+  and implemented in `806bae9`.
+- Issue 1 was additionally validated against a mutated copy of the real projection, not just
+  fixtures: the pre-fix code produced 5 spurious `UNRESOLVED_PARENT` warnings and dropped the parent
+  edges where the fixed code produces one `PARENT_OUT_OF_SELECTION` and preserves them.
+
 Execution model: the main agent orchestrates; Sonnet 5 subagents do the edits. Subagents run in
 parallel only when their file sets are disjoint — file ownership below is exclusive per phase, and a
 subagent may not touch a file it does not own. The main agent runs `npm run check` and `npm test`

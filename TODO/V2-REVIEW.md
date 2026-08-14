@@ -208,3 +208,37 @@ Content is accurate and complete; the problem is density and shape, not correctn
    examples, drop "Increment N" from shipped docs.
 
 Items 1-3 are small and worth doing before the first publish; 4-6 are polish.
+
+## Resolution
+
+All six issues, all five coverage gaps, and the docs pass are complete. Plan and commit mapping is
+in `TODO/V2-FIX-PLAN.md`. 226 tests passing, 0 skipped, 0 todo.
+
+| Item | Status | Where |
+| --- | --- | --- |
+| 1. Spurious `UNRESOLVED_PARENT` | Fixed | `f5b1ac6` — new `PARENT_OUT_OF_SELECTION` code: parent resolvable thread-wide but outside the turn window keeps `parentTaskId`, gets `path: null`, is excluded from `PARENT_OUT_OF_PAGE`, and is not counted in `counts.unresolvedParents` |
+| 2. False `0.1.0` claim | Fixed | `97f52a2` — verified against `git show main:src/cli.js`; `0.1.0` shipped `get`/`find`/`doctor`/`schema`/`install` only |
+| 3. Stale `counts` comment | Fixed | `f5b1ac6` |
+| 4. `BEGIN`/`ROLLBACK` classification | Fixed | `bea4d3d` — shared `runReadTransaction`; a failing `ROLLBACK`/`close` never replaces an error already in flight |
+| 5. `liveState.complete` caveat | Fixed | `1e25d7b` — stated in `SKILL.md`, `references/cli.md`, `references/workflows.md`, and `README.md` |
+| 6. `--since`/`--before` timezone | Fixed | `8f11ae5` — offset-less date-times interpreted as UTC (owner's decision), documented and tested |
+| Gap 1. Real lock contention | Covered | `bea4d3d` — real `SQLITE_BUSY` test added; see caveat below |
+| Gap 2. Turn-scoped parent fixture | Covered | `f5b1ac6` |
+| Gap 3. `--turn-limit` default | Covered | `8f11ae5` |
+| Gap 4. `isBackgrounded` folding | Covered | `99882e6` |
+| Gap 5. `turnId` first-non-null | Covered | `99882e6`; documented in `references/cli.md` |
+| Docs verbosity | Done | `97f52a2`, `1e25d7b` — `CHANGELOG.md` extracted, Skill description and examples reworked, prose replaced by tables, "Increment N" removed from all shipped files including source comments (`c05d7fd`) |
+| Human `participants` output | Done | `806bae9` — kind/type/effort, summary preview, usage, timestamps, last tool, output file; each line omitted when null |
+
+Two honest caveats on the above:
+
+- **Gap 1 is covered, but not by the test that looks like it covers it.** Real lock contention was
+  achieved and asserted, but it does not discriminate the issue-4 fix: `BEGIN DEFERRED` takes no
+  lock and a read-only `ROLLBACK` only releases one, so `SQLITE_BUSY` surfaces at the first `SELECT`,
+  which `queryAll` already classified before the fix. The guards themselves are pinned by five
+  stub-based tests, each verified to fail when its guard is removed.
+- **Issue 1 was validated on real-shaped data, not only fixtures.** No thread in the local
+  projection reproduces it naturally (only one thread has explicit parentage, and all 16 of its
+  edges sit inside one turn), so validation used a mutated copy of the projection: pre-fix, 5
+  spurious `UNRESOLVED_PARENT` and lost parent edges; post-fix, one `PARENT_OUT_OF_SELECTION` with
+  edges preserved.
