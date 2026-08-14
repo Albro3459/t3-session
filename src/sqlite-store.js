@@ -548,9 +548,22 @@ export function retrieveParticipantActivityRows(database, threadId, selection = 
         "participant activities",
       );
 
+  // A selection narrows which activities come back, but a parent task's own activities can
+  // live in a turn outside the window. participants.js needs the thread-wide set of known
+  // task IDs to tell that case apart from a genuinely unresolved parent, so read the same
+  // task activity payloads again unscoped. Payload parsing stays in participants.js (its
+  // tolerant JS parser degrades with a warning on malformed JSON; json_extract would throw).
+  const unscopedActivities = queryAll(
+    database,
+    PARTICIPANT_ACTIVITIES_QUERY,
+    [threadId, ...TASK_ACTIVITY_KINDS],
+    "participant activities",
+  );
+
   return {
     thread,
     activities,
+    unscopedActivities,
     selection: {
       kind: selection.kind,
       turnId: selection.turnId ?? null,

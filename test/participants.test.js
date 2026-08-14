@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -35,6 +37,144 @@ const participantsSchema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
 
 function cleanupFixture(fixture) {
   fs.rmSync(fixture.directory, { recursive: true, force: true });
+}
+
+// A standalone database (not test/fixtures/participant-fixture.js), scoped to
+// PARENT_OUT_OF_SELECTION: a parent whose own activities live in a turn outside the read
+// window, versus a parent that is genuinely absent from the thread. Two threads share this
+// database so each scenario gets its own turn selection without cross-contaminating warnings.
+const TURN_SCOPED_THREAD_ID = "participant-turn-scoped-thread";
+const TURN_SCOPED_TURN_1 = "tsturn-1";
+const TURN_SCOPED_TURN_2 = "tsturn-2";
+const TURN_SCOPED_GHOST_THREAD_ID = "participant-turn-scoped-ghost-thread";
+const TURN_SCOPED_GHOST_TURN = "tsgturn-1";
+
+function createTurnScopedFixture() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "t3-session-turn-scoped-"));
+  const databasePath = path.join(directory, "state.sqlite");
+  const database = new DatabaseSync(databasePath);
+
+  database.exec(`
+    CREATE TABLE projection_projects (
+      project_id TEXT PRIMARY KEY,
+      title TEXT,
+      workspace_root TEXT
+    );
+    CREATE TABLE projection_threads (
+      thread_id TEXT PRIMARY KEY,
+      project_id TEXT,
+      title TEXT,
+      branch TEXT,
+      worktree_path TEXT,
+      latest_turn_id TEXT,
+      created_at TEXT,
+      updated_at TEXT,
+      latest_user_message_at TEXT,
+      deleted_at TEXT,
+      runtime_mode TEXT,
+      interaction_mode TEXT,
+      model_selection_json TEXT
+    );
+    CREATE TABLE projection_thread_messages (
+      message_id TEXT PRIMARY KEY,
+      thread_id TEXT,
+      turn_id TEXT,
+      role TEXT,
+      text TEXT,
+      is_streaming INTEGER,
+      created_at TEXT,
+      updated_at TEXT,
+      attachments_json TEXT
+    );
+    CREATE TABLE projection_thread_activities (
+      activity_id TEXT PRIMARY KEY,
+      thread_id TEXT,
+      turn_id TEXT,
+      tone TEXT,
+      kind TEXT,
+      summary TEXT,
+      payload_json TEXT,
+      created_at TEXT,
+      sequence INTEGER
+    );
+    CREATE TABLE projection_thread_sessions (
+      thread_id TEXT PRIMARY KEY,
+      provider_name TEXT,
+      provider_session_id TEXT,
+      provider_thread_id TEXT,
+      provider_instance_id TEXT,
+      status TEXT,
+      last_error TEXT
+    );
+    CREATE TABLE projection_turns (
+      row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id TEXT,
+      turn_id TEXT,
+      pending_message_id TEXT,
+      source_proposed_plan_thread_id TEXT,
+      source_proposed_plan_id TEXT,
+      assistant_message_id TEXT,
+      state TEXT,
+      requested_at TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      checkpoint_turn_count INTEGER,
+      checkpoint_ref TEXT,
+      checkpoint_status TEXT,
+      checkpoint_files_json TEXT
+    );
+  `);
+
+  const thread = database.prepare(`
+    INSERT INTO projection_threads (
+      thread_id, project_id, title, branch, worktree_path, latest_turn_id,
+      created_at, updated_at, latest_user_message_at, deleted_at, runtime_mode,
+      interaction_mode, model_selection_json
+    ) VALUES (?, NULL, ?, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)
+  `);
+  thread.run(TURN_SCOPED_THREAD_ID, "Turn-scoped parent", TURN_SCOPED_TURN_2,
+    "2026-04-01T00:00:00.000Z", "2026-04-01T00:20:00.000Z");
+  thread.run(TURN_SCOPED_GHOST_THREAD_ID, "Genuinely missing parent", TURN_SCOPED_GHOST_TURN,
+    "2026-04-02T00:00:00.000Z", "2026-04-02T00:20:00.000Z");
+
+  const turn = database.prepare(`
+    INSERT INTO projection_turns (
+      thread_id, turn_id, pending_message_id, source_proposed_plan_thread_id,
+      source_proposed_plan_id, assistant_message_id, state, requested_at, started_at,
+      completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status,
+      checkpoint_files_json
+    ) VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+  `);
+  turn.run(TURN_SCOPED_THREAD_ID, TURN_SCOPED_TURN_1, "completed",
+    "2026-04-01T00:00:10.000Z", "2026-04-01T00:00:11.000Z", "2026-04-01T00:00:59.000Z");
+  turn.run(TURN_SCOPED_THREAD_ID, TURN_SCOPED_TURN_2, "completed",
+    "2026-04-01T00:10:10.000Z", "2026-04-01T00:10:11.000Z", "2026-04-01T00:10:59.000Z");
+  turn.run(TURN_SCOPED_GHOST_THREAD_ID, TURN_SCOPED_GHOST_TURN, "completed",
+    "2026-04-02T00:00:10.000Z", "2026-04-02T00:00:11.000Z", "2026-04-02T00:00:59.000Z");
+
+  const activity = database.prepare(`
+    INSERT INTO projection_thread_activities (
+      activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
+    ) VALUES (?, ?, ?, 'info', ?, NULL, ?, ?, ?)
+  `);
+
+  // task A works only in T1; task B's only activity is in T2 and names A as its parent. A
+  // selection over T2 alone never sees A's own activity.
+  activity.run("tsa-1", TURN_SCOPED_THREAD_ID, TURN_SCOPED_TURN_1, "task.started", JSON.stringify({
+    taskId: "turn-scoped-a", title: "Parent task",
+  }), "2026-04-01T00:00:20.000Z", 1);
+  activity.run("tsa-2", TURN_SCOPED_THREAD_ID, TURN_SCOPED_TURN_2, "task.started", JSON.stringify({
+    taskId: "turn-scoped-b", title: "Child task", parentAgentId: "turn-scoped-a",
+  }), "2026-04-01T00:10:20.000Z", 2);
+
+  // task C names a parent that never appears anywhere in the thread, in or out of the
+  // selected turn -- the genuinely unresolvable case a turn-scoped read must still catch.
+  activity.run("tsg-1", TURN_SCOPED_GHOST_THREAD_ID, TURN_SCOPED_GHOST_TURN, "task.started",
+    JSON.stringify({ taskId: "turn-scoped-c", title: "Orphan under selection", parentAgentId: "turn-scoped-ghost" }),
+    "2026-04-02T00:00:20.000Z", 1);
+
+  database.close();
+  return { directory, databasePath };
 }
 
 function byTaskId(view, taskId) {
@@ -791,6 +931,86 @@ test("tree paging that excludes a resolved parent surfaces the child at the top 
     const outOfPageWarnings = page.warnings.filter((entry) => entry.code === "PARENT_OUT_OF_PAGE");
     assert.equal(outOfPageWarnings.length, 1);
     assert.deepEqual(outOfPageWarnings[0].details.taskIds, ["child-task"]);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("a parent whose own activities live in a different turn produces PARENT_OUT_OF_SELECTION, not UNRESOLVED_PARENT, under a turn selection", async () => {
+  const fixture = createTurnScopedFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(
+      TURN_SCOPED_THREAD_ID,
+      { turnId: TURN_SCOPED_TURN_2, tree: true },
+    );
+
+    assert.equal(view.participants.length, 1);
+    const b = view.participants[0];
+    assert.equal(b.taskId, "turn-scoped-b");
+    assert.equal(b.parentTaskId, "turn-scoped-a");
+    assert.equal(b.path, null);
+    assert.deepEqual(b.children, []);
+
+    const outOfSelectionWarnings = view.warnings.filter((entry) => entry.code === "PARENT_OUT_OF_SELECTION");
+    assert.equal(outOfSelectionWarnings.length, 1);
+    assert.deepEqual(outOfSelectionWarnings[0].details.taskIds, ["turn-scoped-b"]);
+
+    // The same missing-parent child must never be reported under both codes at once.
+    assert.equal(view.warnings.some((entry) => entry.code === "UNRESOLVED_PARENT"), false);
+    assert.equal(view.warnings.some((entry) => entry.code === "PARENT_OUT_OF_PAGE"), false);
+    assert.equal(view.counts.unresolvedParents, 0);
+    assert.equal(view.counts.withExplicitParent, 1);
+    assertValidEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// The discriminating half of the case above: read without a turn selection, the same parent
+// and child nest normally with a real path and no PARENT_OUT_OF_SELECTION warning. A revert
+// or a vacuous fix would leave this test and the one above with the same outcome.
+test("the same turn-scoped fixture read without a turn selection nests normally with a real path", async () => {
+  const fixture = createTurnScopedFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(TURN_SCOPED_THREAD_ID);
+
+    const a = byTaskId(view, "turn-scoped-a");
+    const b = byTaskId(view, "turn-scoped-b");
+    assert.equal(a.parentTaskId, null);
+    assert.equal(a.path, "main.subagent1");
+    assert.equal(b.parentTaskId, "turn-scoped-a");
+    assert.equal(b.path, "main.subagent1.subagent1a");
+
+    assert.equal(view.warnings.some((entry) => entry.code === "PARENT_OUT_OF_SELECTION"), false);
+    assert.equal(view.counts.unresolvedParents, 0);
+    assertValidEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("a parent id that exists nowhere in the thread still yields UNRESOLVED_PARENT under a turn selection", async () => {
+  const fixture = createTurnScopedFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(
+      TURN_SCOPED_GHOST_THREAD_ID,
+      { turnId: TURN_SCOPED_GHOST_TURN },
+    );
+    const c = byTaskId(view, "turn-scoped-c");
+
+    assert.equal(c.parentTaskId, null);
+    assert.equal(c.path, null);
+
+    const warning = view.warnings.find((entry) => entry.code === "UNRESOLVED_PARENT");
+    assert.ok(warning, "expected an UNRESOLVED_PARENT warning");
+    assert.equal(warning.details.taskId, "turn-scoped-c");
+    assert.equal(warning.details.parentAgentId, "turn-scoped-ghost");
+    assert.equal(view.counts.unresolvedParents, 1);
+    assert.equal(view.warnings.some((entry) => entry.code === "PARENT_OUT_OF_SELECTION"), false);
+    assertValidEnvelope(view);
   } finally {
     cleanupFixture(fixture);
   }

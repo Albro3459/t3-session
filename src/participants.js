@@ -261,8 +261,15 @@ function foldActivities(taskId, rows) {
 // Parentage comes only from an explicit, resolvable parentAgentId. Nothing here looks at
 // timestamps, activity order, sequence, toolUseId, or identifier shape: two tasks that merely
 // ran next to each other are two roots, and that is the correct answer.
-function resolveHierarchy(entries, warnings) {
+//
+// threadWideKnownTaskIds is null when no turn selection is active (the entries already cover
+// the whole thread) and a Set of every taskId the thread has ever recorded when one is. A
+// parentAgentId missing from the selected entries but present in that set names a real task
+// whose own activities simply fall outside the window -- PARENT_OUT_OF_SELECTION, not
+// UNRESOLVED_PARENT.
+function resolveHierarchy(entries, warnings, threadWideKnownTaskIds) {
   const byTaskId = new Map(entries.map((entry) => [entry.participant.taskId, entry]));
+  const outOfSelectionTaskIds = new Set();
 
   for (const entry of entries) {
     const { participant, parentAgentId } = entry;
@@ -271,6 +278,13 @@ function resolveHierarchy(entries, warnings) {
     }
 
     if (!byTaskId.has(parentAgentId)) {
+      if (threadWideKnownTaskIds !== null && threadWideKnownTaskIds.has(parentAgentId)) {
+        participant.parentTaskId = parentAgentId;
+        entry.outOfSelectionParent = true;
+        outOfSelectionTaskIds.add(participant.taskId);
+        continue;
+      }
+
       warnings.push({
         code: "UNRESOLVED_PARENT",
         message: "A task recorded a parent that does not resolve to a known participant.",
@@ -281,6 +295,15 @@ function resolveHierarchy(entries, warnings) {
     }
 
     participant.parentTaskId = parentAgentId;
+  }
+
+  if (outOfSelectionTaskIds.size > 0) {
+    warnings.push({
+      code: "PARENT_OUT_OF_SELECTION",
+      message:
+        "A recorded parent's activities fall outside the selected turns, so the child is reported at the top level.",
+      details: { taskIds: [...outOfSelectionTaskIds].sort() },
+    });
   }
 
   // A participant is in a cycle only when following its own parents leads back to itself, so
@@ -313,16 +336,20 @@ function resolveHierarchy(entries, warnings) {
     }
   }
 
-  return byTaskId;
+  return { byTaskId, outOfSelectionTaskIds };
 }
 
 function assignPathsAndDepths(entries) {
   const children = new Map();
   const roots = [];
+  // A PARENT_OUT_OF_SELECTION entry carries a real parentTaskId that names a task outside
+  // this set, so it must fall back to root here exactly as an unresolved or cyclic parent
+  // does, rather than being filed under a parent this walk will never visit.
+  const knownTaskIds = new Set(entries.map((entry) => entry.participant.taskId));
 
   for (const entry of entries) {
     const parentTaskId = entry.participant.parentTaskId;
-    if (parentTaskId === null) {
+    if (parentTaskId === null || !knownTaskIds.has(parentTaskId)) {
       roots.push(entry);
       continue;
     }
@@ -348,7 +375,8 @@ function assignPathsAndDepths(entries) {
 
   while (pending.length > 0) {
     const { entry, depth, label, ancestorSegments, ancestryKnown } = pending.pop();
-    const known = ancestryKnown && !entry.unresolvedParent && !entry.cycleMember;
+    const known = ancestryKnown && !entry.unresolvedParent && !entry.cycleMember
+      && !entry.outOfSelectionParent;
     const segments = [...ancestorSegments, label];
     entry.participant.depth = depth;
     entry.participant.path = known ? ["main", ...segments].join(".") : null;
@@ -420,8 +448,21 @@ export function normalizeParticipants(rows, {
     grouped.get(taskId).push({ row, payload });
   }
 
+  // Present only when a turn selection narrowed rows.activities above. Parsed with a scratch
+  // warnings sink, not `warnings`: these payloads are outside the requested window purely to
+  // build a membership set, so a malformed one out there must not surface a MALFORMED_JSON
+  // warning for an activity the caller never asked to see.
+  const threadWideKnownTaskIds = rows.unscopedActivities
+    ? new Set(
+        rows.unscopedActivities
+          .map((row) => parseJsonField(row.payload_json, `participants.${row.activity_id}.payload`, []).value)
+          .map((payload) => (payload && typeof payload === "object" ? identifierOrNull(payload.taskId) : null))
+          .filter((taskId) => taskId !== null),
+      )
+    : null;
+
   const entries = [...grouped].map(([taskId, taskRows]) => foldActivities(taskId, taskRows));
-  resolveHierarchy(entries, warnings);
+  const { outOfSelectionTaskIds } = resolveHierarchy(entries, warnings, threadWideKnownTaskIds);
   assignPathsAndDepths(entries);
 
   // Sibling labels above are always assigned in ascending order, so --reverse changes the
@@ -438,13 +479,14 @@ export function normalizeParticipants(rows, {
     ? ordered.slice(offset)
     : ordered.slice(offset, offset + options.limit);
 
-  // counts and hierarchyAvailable describe the whole thread, but a tree can only nest what
-  // the page contains. Say so, rather than letting a consumer read hierarchyAvailable: true
-  // off an envelope whose tree was flattened by paging.
+  // counts and hierarchyAvailable are computed from the selected turns (or the whole thread
+  // when no selection is given), not from the --limit/--offset page below: paging only slices
+  // what a tree can nest, it does not change what got counted.
   if (options.tree) {
     const pageTaskIds = new Set(selected.map((participant) => participant.taskId));
     const orphaned = selected
-      .filter((p) => p.parentTaskId !== null && !pageTaskIds.has(p.parentTaskId))
+      .filter((p) => p.parentTaskId !== null && !pageTaskIds.has(p.parentTaskId)
+        && !outOfSelectionTaskIds.has(p.taskId))
       .map((p) => p.taskId)
       .sort();
     if (orphaned.length > 0) {
