@@ -1,5 +1,6 @@
 import { resolveConfig } from "./config.js";
 import {
+  EXIT_CODES,
   InvalidArgumentsError,
   NotImplementedError,
   RawJsonlPartiallyUnreadableError,
@@ -88,8 +89,23 @@ function writeLine(stream, value) {
   stream.write(`${value}\n`);
 }
 
+// Mirrors doctorExitCode: the envelope is still emitted in full, but an exact --turn that
+// resolved to zero turns is surfaced as a non-zero exit rather than silently looking like a
+// legitimately empty turn-window page.
+function turnSelectionExitCode(warnings) {
+  return warnings.some((warning) => warning.code === "TURN_NOT_FOUND")
+    ? EXIT_CODES.THREAD_NOT_FOUND
+    : 0;
+}
+
+const NEGATIVE_NUMBER = /^-\d/;
+
 function requireOptionValue(argv, index, option) {
   const value = argv[index + 1];
+  if (value !== undefined && NEGATIVE_NUMBER.test(value)) {
+    throw new InvalidArgumentsError(`${option} does not accept a negative value.`, { option, value });
+  }
+
   if (value === undefined || value === "" || value.startsWith("-")) {
     throw new InvalidArgumentsError(`Missing value for ${option}.`, { option });
   }
@@ -299,7 +315,7 @@ export function formatHelp() {
     "                            (a date-time with no UTC offset is interpreted as UTC)",
     "    --before <timestamp>   Include threads updated before an ISO-8601 timestamp",
     "                            (a date-time with no UTC offset is interpreted as UTC)",
-    "    --limit <n>            Maximum threads to return (default 50)",
+    "    --limit <n>            Maximum threads to return (default 50; must be 1 or greater)",
     "    --offset <n>           Skip matching threads before applying --limit",
     "    --reverse              Sort newest-first instead of oldest-first",
     "    --format human|json|jsonl",
@@ -310,15 +326,15 @@ export function formatHelp() {
     "    --raw-jsonl            Emit parsed raw provider events as JSONL",
     "    --last-turn            Retrieve only the newest turn and its records",
     "    --turn <turn-id>       Retrieve one exact turn and its records",
-    "    --turn-limit <n>       Retrieve a bounded window of turns from the newest side",
+    "    --turn-limit <n>       Retrieve a bounded window of turns from the newest side (must be 1 or greater)",
     "    --turn-offset <n>      Skip turns from the newest side before --turn-limit",
     "  participants <thread-id>  List the task participants in a thread",
     "    --tree                 Nest explicit parent/child relationships",
     "    --last-turn            Only participants whose activities touch the newest turn",
     "    --turn <turn-id>       Only participants whose activities touch that turn",
-    "    --turn-limit <n>       Only participants touching the newest n turns",
+    "    --turn-limit <n>       Only participants touching the newest n turns (must be 1 or greater)",
     "    --turn-offset <n>      Skip turns from the newest side before --turn-limit",
-    "    --limit <n>            Maximum participants returned (no default)",
+    "    --limit <n>            Maximum participants returned (no default; must be 1 or greater)",
     "    --offset <n>           Skip participants before applying --limit",
     "    --reverse              Newest-first instead of the default oldest-first",
     "    --format human|json|jsonl",
@@ -327,7 +343,7 @@ export function formatHelp() {
     "    --interval <ms>        Poll interval in milliseconds; default 1000; 100-60000",
     "    --max-cycles <n>       Stop after n poll cycles",
     "    --timeout <ms>         Stop after a wall-clock duration",
-    "    --turn-limit <n>       Bound each poll to the newest n turns",
+    "    --turn-limit <n>       Bound each poll to the newest n turns (must be 1 or greater)",
     "    --format jsonl|json    jsonl is the default; json requires a bounded tail",
     "  find --title <text>     Find threads by title",
     "    --format json          Emit normalized search results",
@@ -473,15 +489,17 @@ async function handleGet(options) {
     turnOffset: options.turnOffset,
   });
 
+  const exitCode = turnSelectionExitCode(thread.warnings);
+
   if (format === "json") {
-    return { output: formatThreadJson(thread) };
+    return { output: formatThreadJson(thread), exitCode };
   }
 
   if (format === "jsonl") {
-    return { output: formatThreadJsonl(thread) };
+    return { output: formatThreadJsonl(thread), exitCode };
   }
 
-  return { output: formatThreadHuman(thread) };
+  return { output: formatThreadHuman(thread), exitCode };
 }
 
 async function handleParticipants(options) {
@@ -547,15 +565,17 @@ async function handleParticipants(options) {
     tree: options.tree,
   });
 
+  const exitCode = turnSelectionExitCode(view.warnings);
+
   if (format === "json") {
-    return { output: formatParticipantsJson(view) };
+    return { output: formatParticipantsJson(view), exitCode };
   }
 
   if (format === "jsonl") {
-    return { output: formatParticipantsJsonl(view) };
+    return { output: formatParticipantsJsonl(view), exitCode };
   }
 
-  return { output: formatParticipantsHuman(view) };
+  return { output: formatParticipantsHuman(view), exitCode };
 }
 
 // tail streams t3-session.tail-record.v1 records straight to the provided stream rather

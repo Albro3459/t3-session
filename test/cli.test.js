@@ -148,6 +148,70 @@ test("parses get options before and after the command", () => {
   });
 });
 
+test("a negative numeric option value reports a negative-value error, not a missing-value error", () => {
+  assert.throws(
+    () => parseCliArgs(["list", "--offset", "-1"]),
+    (error) => {
+      assert.equal(error.code, "INVALID_ARGUMENTS");
+      assert.equal(error.message, "--offset does not accept a negative value.");
+      assert.deepEqual(error.details, { option: "--offset", value: "-1" });
+      return true;
+    },
+  );
+
+  assert.throws(
+    () => parseCliArgs(["list", "--limit", "-5"]),
+    (error) => {
+      assert.equal(error.message, "--limit does not accept a negative value.");
+      assert.deepEqual(error.details, { option: "--limit", value: "-5" });
+      return true;
+    },
+  );
+});
+
+test("a genuinely missing option value keeps the missing-value error for an absent token, an empty token, and another flag", () => {
+  assert.throws(
+    () => parseCliArgs(["list", "--offset"]),
+    (error) => {
+      assert.equal(error.code, "INVALID_ARGUMENTS");
+      assert.equal(error.message, "Missing value for --offset.");
+      assert.deepEqual(error.details, { option: "--offset" });
+      return true;
+    },
+  );
+
+  assert.throws(
+    () => parseCliArgs(["list", "--offset", "", "--limit", "1"]),
+    (error) => {
+      assert.equal(error.message, "Missing value for --offset.");
+      return true;
+    },
+  );
+
+  assert.throws(
+    () => parseCliArgs(["list", "--offset", "--limit", "1"]),
+    (error) => {
+      assert.equal(error.message, "Missing value for --offset.");
+      return true;
+    },
+  );
+});
+
+test("list --offset with a negative value exits 3 with a negative-value message via the CLI", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "list", "--offset", "-1", "--db", fixture.databasePath,
+    ]);
+    assert.equal(result.status, 3);
+    const error = parseError(result);
+    assert.equal(error.code, "INVALID_ARGUMENTS");
+    assert.match(error.message, /does not accept a negative value/);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
 test("prints human-readable thread metadata, messages, and activities", () => {
   const fixture = createFixtureDatabase();
   try {
@@ -807,6 +871,11 @@ test("list rejects invalid values before opening SQLite", () => {
     assert.equal(badLimit.status, 3);
     assert.equal(parseError(badLimit).code, "INVALID_ARGUMENTS");
 
+    const zeroLimit = runCli(fixture, ["list", "--limit", "0", "--db", fixture.databasePath]);
+    assert.equal(zeroLimit.status, 3);
+    assert.equal(parseError(zeroLimit).code, "INVALID_ARGUMENTS");
+    assert.match(parseError(zeroLimit).message, /must be a positive integer/);
+
     const badSince = runCli(fixture, ["list", "--since", "not-a-date", "--db", fixture.databasePath]);
     assert.equal(badSince.status, 3);
     assert.equal(parseError(badSince).code, "INVALID_ARGUMENTS");
@@ -878,6 +947,59 @@ test("get --turn selects one exact turn", () => {
     assert.deepEqual(thread.selection.selectedTurnIds, ["wturn-1"]);
     assert.equal(thread.turns.length, 1);
     assert.equal(thread.turns[0].turnId, "wturn-1");
+    assert.equal(thread.warnings.some((entry) => entry.code === "TURN_NOT_FOUND"), false);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("get --turn with a turn ID that matches nothing warns TURN_NOT_FOUND and exits 2 in every format", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    for (const format of ["human", "json", "jsonl"]) {
+      const result = runCli(fixture, [
+        "get", WINDOW_THREAD_ID, "--turn", "does-not-exist", "--format", format, "--db", fixture.databasePath,
+      ]);
+
+      assert.equal(result.status, 2, format);
+      assert.notEqual(result.stdout, "", format);
+      assert.equal(result.stderr, "", format);
+
+      if (format === "json") {
+        const thread = JSON.parse(result.stdout);
+        assert.equal(thread.selection.kind, "turn");
+        assert.equal(thread.turns.length, 0);
+        const warning = thread.warnings.find((entry) => entry.code === "TURN_NOT_FOUND");
+        assert.ok(warning, "expected a TURN_NOT_FOUND warning");
+        assert.equal(warning.details.turnId, "does-not-exist");
+      } else if (format === "jsonl") {
+        const records = result.stdout.trimEnd().split("\n").map((line) => JSON.parse(line));
+        const header = records[0];
+        assert.equal(header.recordType, "thread");
+        const warning = header.warnings.find((entry) => entry.code === "TURN_NOT_FOUND");
+        assert.ok(warning, "expected a TURN_NOT_FOUND warning");
+      } else {
+        assert.match(result.stdout, /TURN_NOT_FOUND/);
+      }
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("get --turn-offset past the end of the thread is a valid empty page: exit 0 and no TURN_NOT_FOUND warning", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "get", WINDOW_THREAD_ID, "--turn-offset", "50", "--format", "json", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const thread = JSON.parse(result.stdout);
+    assert.equal(thread.selection.kind, "turn-window");
+    assert.equal(thread.turns.length, 0);
+    assert.equal(thread.warnings.some((entry) => entry.code === "TURN_NOT_FOUND"), false);
   } finally {
     cleanupFixture(fixture);
   }
@@ -938,6 +1060,21 @@ test("get --turn-offset alone defaults --turn-limit to 1", () => {
     assert.equal(thread.selection.turnLimit, 1);
     assert.equal(thread.selection.turnOffset, 1);
     assert.deepEqual(thread.selection.selectedTurnIds, ["wturn-2"]);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("get --turn-limit 0 is rejected with exit code 3", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "get", WINDOW_THREAD_ID, "--turn-limit", "0", "--db", fixture.databasePath,
+    ]);
+    assert.equal(result.status, 3);
+    const error = parseError(result);
+    assert.equal(error.code, "INVALID_ARGUMENTS");
+    assert.match(error.message, /must be a positive integer/);
   } finally {
     cleanupFixture(fixture);
   }
@@ -1719,6 +1856,61 @@ test("participants --turn bounds the view and reports the selection", () => {
     assert.deepEqual(view.participants.map((p) => p.taskId), ["task-gamma"]);
     assert.equal(view.selection.kind, "turn");
     assert.equal(view.selection.turnId, "pturn-2");
+    assert.equal(view.warnings.some((entry) => entry.code === "TURN_NOT_FOUND"), false);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --turn with a turn ID that matches nothing warns TURN_NOT_FOUND and exits 2 in every format", () => {
+  const fixture = createParticipantFixture();
+  try {
+    for (const format of ["human", "json", "jsonl"]) {
+      const result = runCli(fixture, [
+        "participants", PARTICIPANT_FLAT_THREAD_ID, "--turn", "does-not-exist", "--format", format,
+        "--db", fixture.databasePath,
+      ]);
+
+      assert.equal(result.status, 2, format);
+      assert.notEqual(result.stdout, "", format);
+      assert.equal(result.stderr, "", format);
+
+      if (format === "json") {
+        const view = JSON.parse(result.stdout);
+        assert.equal(view.selection.kind, "turn");
+        assert.deepEqual(view.participants, []);
+        const warning = view.warnings.find((entry) => entry.code === "TURN_NOT_FOUND");
+        assert.ok(warning, "expected a TURN_NOT_FOUND warning");
+        assert.equal(warning.details.turnId, "does-not-exist");
+      } else if (format === "jsonl") {
+        const records = result.stdout.trimEnd().split("\n").map((line) => JSON.parse(line));
+        const header = records[0];
+        assert.equal(header.recordType, "participants");
+        const warning = header.data.warnings.find((entry) => entry.code === "TURN_NOT_FOUND");
+        assert.ok(warning, "expected a TURN_NOT_FOUND warning");
+      } else {
+        assert.match(result.stdout, /TURN_NOT_FOUND/);
+      }
+    }
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --turn-offset past the end of the thread is a valid empty page: exit 0 and no TURN_NOT_FOUND warning", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--turn-offset", "50", "--format", "json",
+      "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const view = JSON.parse(result.stdout);
+    assert.equal(view.selection.kind, "turn-window");
+    assert.deepEqual(view.participants, []);
+    assert.equal(view.warnings.some((entry) => entry.code === "TURN_NOT_FOUND"), false);
   } finally {
     cleanupFixture(fixture);
   }
@@ -1745,6 +1937,21 @@ test("participants --limit, --offset, and --reverse page and order the view", ()
       JSON.parse(reversed.stdout).participants.map((p) => p.taskId),
       ["task-gamma", "task-beta", "task-alpha"],
     );
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants --limit 0 is rejected with exit code 3", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--limit", "0", "--db", fixture.databasePath,
+    ]);
+    assert.equal(result.status, 3);
+    const error = parseError(result);
+    assert.equal(error.code, "INVALID_ARGUMENTS");
+    assert.match(error.message, /must be a positive integer/);
   } finally {
     cleanupFixture(fixture);
   }
@@ -1869,9 +2076,9 @@ test("--help documents participants and every Increment 3 option", () => {
       "    --tree                 Nest explicit parent/child relationships",
       "    --last-turn            Only participants whose activities touch the newest turn",
       "    --turn <turn-id>       Only participants whose activities touch that turn",
-      "    --turn-limit <n>       Only participants touching the newest n turns",
+      "    --turn-limit <n>       Only participants touching the newest n turns (must be 1 or greater)",
       "    --turn-offset <n>      Skip turns from the newest side before --turn-limit",
-      "    --limit <n>            Maximum participants returned (no default)",
+      "    --limit <n>            Maximum participants returned (no default; must be 1 or greater)",
       "    --offset <n>           Skip participants before applying --limit",
       "    --reverse              Newest-first instead of the default oldest-first",
       "    --format human|json|jsonl",

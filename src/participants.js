@@ -426,6 +426,18 @@ export function normalizeParticipants(rows, {
   options,
 } = {}) {
   const warnings = [];
+
+  // An exact turn ID that resolved to nothing is ambiguous with a legitimately empty view
+  // unless flagged explicitly. A turn-window offset past the end is a valid empty page and
+  // stays silent.
+  if (rows.selection?.kind === "turn" && (rows.selection.selectedTurnIds?.length ?? 0) === 0) {
+    warnings.push({
+      code: "TURN_NOT_FOUND",
+      message: "No turn matched the requested turn ID.",
+      details: { turnId: rows.selection.turnId },
+    });
+  }
+
   const grouped = new Map();
 
   const activityRows = [...rows.activities].sort(compareActivityRows);

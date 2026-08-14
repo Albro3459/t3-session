@@ -166,6 +166,7 @@ export {
   normalizeCount,
   normalizeListOptions,
   normalizeParticipantOptions,
+  normalizePositiveCount,
   normalizeProjectFilter,
   normalizeTailOptions,
   normalizeTimestamp,

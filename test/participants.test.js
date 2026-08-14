@@ -1091,6 +1091,40 @@ test("a parent id that exists nowhere in the thread still yields UNRESOLVED_PARE
   }
 });
 
+test("an exact turnId that matches no turn emits TURN_NOT_FOUND with an empty participants list", async () => {
+  const fixture = createParticipantFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(FLAT_THREAD_ID, { turnId: "does-not-exist" });
+
+    assert.equal(view.selection.kind, "turn");
+    assert.deepEqual(view.participants, []);
+    const warning = view.warnings.find((entry) => entry.code === "TURN_NOT_FOUND");
+    assert.ok(warning, "expected a TURN_NOT_FOUND warning");
+    assert.equal(warning.details.turnId, "does-not-exist");
+    assertValidEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// The discriminating half of the case above: a turn-window that lands past the end is a
+// valid empty page, not an error condition, so it must never emit TURN_NOT_FOUND.
+test("a turn-window offset past the end of the thread is a silent empty page, not TURN_NOT_FOUND", async () => {
+  const fixture = createParticipantFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(FLAT_THREAD_ID, { turnLimit: 1, turnOffset: 50 });
+
+    assert.equal(view.selection.kind, "turn-window");
+    assert.deepEqual(view.participants, []);
+    assert.equal(view.warnings.some((entry) => entry.code === "TURN_NOT_FOUND"), false);
+    assertValidEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
 test("--tree without paging emits no PARENT_OUT_OF_PAGE warning", async () => {
   const fixture = createParticipantFixture();
   try {

@@ -59,6 +59,17 @@ export function normalizeCount(value, field, fallback) {
   return value;
 }
 
+// A limit of 0 parses as a valid non-negative integer but returns nothing, which is
+// indistinguishable from an empty result. Limits must be positive; offsets stay non-negative.
+export function normalizePositiveCount(value, field, fallback) {
+  const count = normalizeCount(value, field, fallback);
+  if (count !== null && count !== undefined && count < 1) {
+    throw new InvalidArgumentsError(`${field} must be a positive integer.`, { field, value });
+  }
+
+  return count;
+}
+
 export function normalizeProjectFilter(value) {
   if (value === undefined || value === null) {
     return null;
@@ -91,7 +102,7 @@ export function normalizeListOptions(options = {}) {
     project: normalizeProjectFilter(options.project),
     since: normalizeTimestamp(options.since, "since"),
     before: normalizeTimestamp(options.before, "before"),
-    limit: normalizeCount(options.limit, "limit", DEFAULT_LIST_LIMIT),
+    limit: normalizePositiveCount(options.limit, "limit", DEFAULT_LIST_LIMIT),
     offset: normalizeCount(options.offset, "offset", 0),
     reverse: normalizeFlag(options.reverse, "reverse"),
   });
@@ -156,7 +167,7 @@ export function normalizeParticipantOptions(options = {}) {
     selection: normalizeTurnSelection(options),
     reverse: normalizeFlag(options.reverse, "reverse"),
     tree: normalizeFlag(options.tree, "tree"),
-    limit: normalizeCount(options.limit, "limit", null),
+    limit: normalizePositiveCount(options.limit, "limit", null),
     offset: normalizeCount(options.offset, "offset", 0),
   });
 }
@@ -199,7 +210,7 @@ export function normalizeTurnSelection(options = {}) {
 
   return Object.freeze({
     kind: "turn-window",
-    turnLimit: normalizeCount(options.turnLimit, "turnLimit", DEFAULT_TURN_LIMIT),
+    turnLimit: normalizePositiveCount(options.turnLimit, "turnLimit", DEFAULT_TURN_LIMIT),
     turnOffset: normalizeCount(options.turnOffset, "turnOffset", 0),
   });
 }

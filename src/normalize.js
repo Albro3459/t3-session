@@ -334,6 +334,17 @@ export function normalizeThread(rows, { toolVersion = VERSION, selection, observ
       totalTurns: selection.totalTurns ?? null,
       selectedTurnIds: turns.map((turn) => turn.turnId).filter((turnId) => turnId !== null),
     };
+
+    // An exact turn ID that resolved to nothing is ambiguous with a legitimately empty
+    // window unless flagged explicitly. A turn-window offset past the end is a valid empty
+    // page and stays silent.
+    if (selection.kind === "turn" && turns.length === 0) {
+      warnings.push({
+        code: "TURN_NOT_FOUND",
+        message: "No turn matched the requested turn ID.",
+        details: { turnId: selection.turnId },
+      });
+    }
   }
 
   return normalized;
