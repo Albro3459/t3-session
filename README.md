@@ -74,7 +74,7 @@ Supported options:
 --format human|json|jsonl
 ```
 
-The default limit is 50, so a listing cannot be retrieved unbounded by accident; pass `--limit` to request a different page size. Ordering is deterministic: threads are sorted by `updated_at`, then by `thread_id` as a tie-breaker in the same direction. Threads with a null `updated_at` sort last in both the default and `--reverse` order, and are excluded entirely when `--since` or `--before` is used, since a null timestamp cannot satisfy a bound. `--since` is inclusive and `--before` is exclusive, so adjacent time windows compose without overlapping or double counting. Deleted threads are excluded. `--format json` and `--format jsonl` emit the `t3-session.list.v1` envelope, which reports `filters`, `ordering`, `limit`, `offset`, `count`, and `hasMore` alongside the returned `threads`. Use `hasMore` with `--offset` to page through results. Listing output contains thread metadata only — it never includes message or activity text.
+The default limit is 50, so a listing cannot be retrieved unbounded by accident; pass `--limit` to request a different page size. Ordering is deterministic: threads are sorted by `updated_at`, then by `thread_id` as a tie-breaker in the same direction. Threads with a null `updated_at` sort last in both the default and `--reverse` order, and are excluded entirely when `--since` or `--before` is used, since a null timestamp cannot satisfy a bound. `--since` is inclusive and `--before` is exclusive, so adjacent time windows compose without overlapping or double counting. An ISO-8601 date-time given without a UTC offset — including the space-separated form, e.g. `2026-08-10 09:00` — is interpreted as UTC, matching the date-only form and UTC storage. Deleted threads are excluded. `--format json` and `--format jsonl` emit the `t3-session.list.v1` envelope, which reports `filters`, `ordering`, `limit`, `offset`, `count`, and `hasMore` alongside the returned `threads`. Use `hasMore` with `--offset` to page through results. Listing output contains thread metadata only — it never includes message or activity text.
 
 ## Retrieve a thread
 
@@ -167,7 +167,7 @@ Interruption and failure behavior:
 - **A thread that disappears mid-tail** emits the `end` record with reason `"thread-not-found"` and exits 2, the same code `get` uses for a missing thread.
 - **A missing thread at startup** behaves exactly like `get`: exit 2, nothing on stdout.
 
-Exit codes are unchanged from Increment 1.
+These exit codes match `get` and the rest of the CLI.
 
 ## Thread participants
 
@@ -218,6 +218,8 @@ Anything the projection carries that this package does not model — `phases`, `
 `UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings describe a projection that recorded a parent that does not resolve to a known participant, or that recorded contradictory parentage. In both cases the affected participants are reported as roots with a `null` path, rather than being dropped or given an invented placeholder parent. A task whose `parentAgentId` equals its own `taskId` resolves (the identifier does name a known participant), so it is reported as `PARENT_CYCLE`, a one-node cycle, not `UNRESOLVED_PARENT`. A task that is merely downstream of a cycle — not on the cycle itself — keeps its own explicit `parentTaskId`; it only loses its `path`, since ancestry through a broken link can no longer be confirmed. Only tasks actually on the cycle are demoted to roots and named in `PARENT_CYCLE`.
 
 `PARENT_OUT_OF_PAGE` is specific to `--tree` combined with `--limit`/`--offset`: `counts` and `hierarchyAvailable` describe everything matching before paging, but a tree can only nest what the returned page contains. When a resolved parent falls outside the page, its child is surfaced at the top level instead of being dropped, and this warning names the affected child task IDs. This means `hierarchyAvailable: true` can legitimately accompany a visually flat or partial tree — check the warning, not just the shape of the output, before concluding the hierarchy is missing.
+
+`PARENT_OUT_OF_SELECTION` is the equivalent for a turn selection (`--turn`, `--turn-limit`, `--turn-offset`, `--last-turn`): when a task's recorded parent is a real task in the thread but that parent's own activities fall outside the selected turns, the child keeps its real `parentTaskId`, gets `path: null`, is surfaced at the top level, and this warning names the affected child task IDs. `UNRESOLVED_PARENT` under a turn selection means only a parent that does not exist anywhere in the thread — re-run without a turn selection to tell the two cases apart.
 
 ### Ordering
 
@@ -293,19 +295,11 @@ The package opens SQLite read-only, allows SQLite WAL/SHM files to be used, and 
 
 ## Schema and compatibility policy
 
-The normalized output is versioned as `t3-session.thread.v1`. JSONL records are versioned as `t3-session.jsonl-record.v1`, and machine-readable errors as `t3-session.error.v1`. New fields may be added without changing existing field meanings; a breaking output change requires a new schema version. The public API and CLI commands remain stable across compatible releases.
+The normalized output is versioned as `t3-session.thread.v1`. JSONL records are versioned as `t3-session.jsonl-record.v1`, and machine-readable errors as `t3-session.error.v1`. New fields may be added without changing existing field meanings; a breaking output change requires a new schema version. The public API and CLI commands remain stable across compatible releases. A new command gets its own schema rather than a breaking version bump on an existing one.
 
-`t3-session.list.v1` is a new schema for the paginated `list` command; it does not replace or version `thread.v1`. `selection` is an additive optional field on `thread.v1` — it is present only for bounded `get` retrieval, so existing consumers that read full threads are unaffected. `t3-session.tail-record.v1` is a new schema for the `tail` command; it does not version or replace `t3-session.jsonl-record.v1`, because tail records carry an operation and an observation timestamp that thread JSONL records do not.
+The package is pre-1.0. `toolVersion` in every envelope tracks the package version, not a schema version. Check the installed tool version with `t3-session --version`.
 
-`t3-session.participants.v1` is a new schema for the `participants` command; it does not version or replace `thread.v1`. `"participants"` and `"participant"` were added to the `t3-session.jsonl-record.v1` `recordType` enum as an additive change, the same kind of change as adding `"list"` in Increment 1. Participants are deliberately **not** added to `thread.v1`: `get --format json` already carries `selection` and `liveState`, and adding a third always-present array would change `get` output for every consumer that does not want it. The participant view is a separate command with its own schema instead. This is a decision note, not a breaking-change note — `get` output is unchanged by Increment 3.
-
-The package is pre-1.0 and unpublished. `toolVersion` in every envelope tracks the package version, not a schema version: `0.1.0` covered Increment 1 only, and `0.2.0` now covers Increments 1-3 (list and bounded `get`, `liveState` and `tail`, and `participants`). No schema version changed with this bump — `thread.v1`, `list.v1`, `tail-record.v1`, `jsonl-record.v1`, and `participants.v1` are all unchanged. Check the installed tool version with `t3-session --version`.
-
-The package is still pre-1.0, so three corrections are recorded here explicitly:
-
-- Normalized JSONL (`get --format jsonl`) changed from grouped order (all turns, then all messages, then all activities) to chronological order by event timestamp.
-- `find`'s default order changed from newest-first (`updated_at` descending) to oldest-first chronological, matching `list`; use `--reverse` to restore newest-first. Ties now break deterministically on `thread_id`.
-- `liveState` is a new always-present property on `thread.v1`, which means `get --format json` output is no longer byte-identical to 0.1.0 output. This is an accepted additive change for a pre-1.0 package and does not create a `thread.v2`.
+See [`CHANGELOG.md`](CHANGELOG.md) for release history, schema decisions, and pre-1.0 corrections.
 
 ## Development
 

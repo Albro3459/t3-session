@@ -13,11 +13,13 @@ const requiredPackageFiles = [
   "schemas/",
   "skills/",
   "README.md",
+  "CHANGELOG.md",
   "LICENSE",
   "NOTICE.txt",
 ];
 const requiredReleaseFiles = [
   "README.md",
+  "CHANGELOG.md",
   "LICENSE",
   "NOTICE.txt",
   "schemas/thread.v1.json",
