@@ -217,8 +217,12 @@ export function buildFindThreadsQuery(reverse) {
       t.thread_id,
       t.project_id,
       t.title,
+      t.branch,
+      t.worktree_path,
+      t.latest_turn_id,
       t.created_at,
       t.updated_at,
+      t.latest_user_message_at,
       p.project_id AS project_join_id,
       p.title AS project_title,
       p.workspace_root

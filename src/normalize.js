@@ -2,6 +2,7 @@ import { VERSION } from "./version.js";
 
 const SCHEMA_VERSION = "t3-session.thread.v1";
 const LIST_SCHEMA_VERSION = "t3-session.list.v1";
+const FIND_SCHEMA_VERSION = "t3-session.find.v1";
 
 // A turn state outside this set is treated as non-terminal, because reporting an
 // unfinished thread as settled is the more damaging error.
@@ -212,14 +213,21 @@ function projectFromJoinRow(row) {
       };
 }
 
-export function normalizeThreadSearchResult(row) {
+export function normalizeThreadSearchResult(rows, { toolVersion = VERSION, title, reverse = false } = {}) {
+  const threads = rows.map(normalizeThreadSummary);
+
   return {
-    id: row.thread_id,
-    projectId: row.project_id ?? null,
-    title: row.title ?? null,
-    project: projectFromJoinRow(row),
-    createdAt: row.created_at ?? null,
-    updatedAt: row.updated_at ?? null,
+    schemaVersion: FIND_SCHEMA_VERSION,
+    toolVersion,
+    filters: {
+      title: typeof title === "string" ? title.trim() : (title ?? null),
+    },
+    ordering: {
+      sortBy: "updatedAt",
+      direction: reverse ? "desc" : "asc",
+    },
+    count: threads.length,
+    threads,
   };
 }
 
@@ -350,4 +358,4 @@ export function normalizeThread(rows, { toolVersion = VERSION, selection, observ
   return normalized;
 }
 
-export { SCHEMA_VERSION, LIST_SCHEMA_VERSION };
+export { SCHEMA_VERSION, LIST_SCHEMA_VERSION, FIND_SCHEMA_VERSION };

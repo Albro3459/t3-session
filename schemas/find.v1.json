@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://t3-session.dev/schemas/find.v1.json",
+  "title": "t3-session normalized thread search results",
+  "description": "Thread summaries matched by title search. Thread summaries are metadata only and never contain message or activity text. Shares its threadSummary shape with list.v1.json.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "toolVersion",
+    "filters",
+    "ordering",
+    "count",
+    "threads"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "t3-session.find.v1" },
+    "toolVersion": { "type": "string" },
+    "filters": {
+      "type": "object",
+      "required": ["title"],
+      "properties": {
+        "title": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "ordering": {
+      "type": "object",
+      "required": ["sortBy", "direction"],
+      "properties": {
+        "sortBy": { "const": "updatedAt" },
+        "direction": { "type": "string", "enum": ["asc", "desc"] }
+      },
+      "additionalProperties": false
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "threads": { "type": "array", "items": { "$ref": "#/$defs/threadSummary" } }
+  },
+  "$defs": {
+    "threadSummary": {
+      "type": "object",
+      "required": [
+        "id",
+        "projectId",
+        "title",
+        "project",
+        "branch",
+        "worktreePath",
+        "createdAt",
+        "updatedAt",
+        "latestUserMessageAt",
+        "latestTurnId"
+      ],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "projectId": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
+        "project": {
+          "type": ["object", "null"],
+          "properties": {
+            "title": { "type": ["string", "null"] },
+            "workspaceRoot": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "branch": { "type": ["string", "null"] },
+        "worktreePath": { "type": ["string", "null"] },
+        "createdAt": { "type": ["string", "null"] },
+        "updatedAt": { "type": ["string", "null"] },
+        "latestUserMessageAt": { "type": ["string", "null"] },
+        "latestTurnId": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

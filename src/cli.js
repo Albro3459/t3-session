@@ -752,7 +752,7 @@ async function handleFind(options) {
   return {
     output: format === "json"
       ? formatFindJson(matches)
-      : formatFindHuman(matches, options.title),
+      : formatFindHuman(matches),
   };
 }
 
@@ -841,7 +841,7 @@ async function handleSchema(options) {
   if (options.args.length !== 1 || options.args[0].startsWith("-")) {
     throw new InvalidArgumentsError("schema requires exactly one schema name.", {
       command: "schema",
-      expected: "schema <thread.v1|error.v1|jsonl-record.v1|list.v1|tail-record.v1|participants.v1>",
+      expected: "schema <thread.v1|error.v1|jsonl-record.v1|list.v1|tail-record.v1|participants.v1|doctor.v1|find.v1>",
     });
   }
 

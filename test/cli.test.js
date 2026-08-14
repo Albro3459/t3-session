@@ -493,10 +493,15 @@ test("finds titles through the CLI with JSON output and no diagnostics", () => {
 
     assert.equal(result.status, 0);
     assert.equal(result.stderr, "");
-    const matches = JSON.parse(result.stdout);
-    assert.deepEqual(matches.map((match) => match.id), [ACTIVE_THREAD_ID]);
-    assert.equal(matches[0].title, "Sanitized recovery thread");
-    assert.equal(matches[0].project.title, "Sanitized project");
+    const found = JSON.parse(result.stdout);
+    assert.equal(found.schemaVersion, "t3-session.find.v1");
+    assert.equal(found.filters.title, "SANITIZED RECOVERY");
+    assert.equal(found.count, 1);
+    assert.deepEqual(found.threads.map((match) => match.id), [ACTIVE_THREAD_ID]);
+    assert.equal(found.threads[0].title, "Sanitized recovery thread");
+    assert.equal(found.threads[0].project.title, "Sanitized project");
+    assert.equal(found.threads[0].branch, "main");
+    assert.equal(found.threads[0].worktreePath, "/tmp/sanitized-worktree");
   } finally {
     cleanupFixture(fixture);
   }

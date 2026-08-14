@@ -170,24 +170,29 @@ export function formatThreadJson(thread) {
   return `${JSON.stringify(thread, null, 2)}\n`;
 }
 
-export function formatFindJson(matches) {
-  return `${JSON.stringify(matches, null, 2)}\n`;
+export function formatFindJson(result) {
+  return `${JSON.stringify(result, null, 2)}\n`;
 }
 
-export function formatFindHuman(matches, title) {
-  const lines = ["Threads", "=======", "", `Title: ${title?.trim() || "-"}`, ""];
-  if (matches.length === 0) {
+export function formatFindHuman(result) {
+  const lines = ["Threads", "=======", ""];
+  addField(lines, "Title", result.filters.title);
+  lines.push(`Order: ${result.ordering.sortBy} ${result.ordering.direction}`);
+  addField(lines, "Returned", result.count);
+  lines.push("");
+
+  if (result.threads.length === 0) {
     lines.push("No matching threads.");
     return `${lines.join("\n")}\n`;
   }
 
-  for (const match of matches) {
+  for (const thread of result.threads) {
     lines.push(
-      `${match.title || "(untitled)"}`,
-      `  ID: ${match.id}`,
-      `  Project: ${match.project?.title || "-"}`,
-      `  Updated: ${match.updatedAt || "-"}`,
-      `  Created: ${match.createdAt || "-"}`,
+      `${thread.title || "(untitled)"}`,
+      `  ID: ${thread.id}`,
+      `  Project: ${thread.project?.title || "-"}`,
+      `  Updated: ${thread.updatedAt || "-"}`,
+      `  Created: ${thread.createdAt || "-"}`,
       "",
     );
   }

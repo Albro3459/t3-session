@@ -100,8 +100,12 @@ export async function createT3SessionClient(options = {}) {
     async findThreads(requestOptions = {}) {
       const reverse = requestOptions.reverse === true;
       const databasePath = requestOptions.db || requestOptions.stateDb || config.stateDb;
-      return findThreadsFromDatabase(databasePath, requestOptions.title, { reverse })
-        .map(normalizeThreadSearchResult);
+      const rows = findThreadsFromDatabase(databasePath, requestOptions.title, { reverse });
+      return normalizeThreadSearchResult(rows, {
+        toolVersion: VERSION,
+        title: requestOptions.title,
+        reverse,
+      });
     },
     async readRawJsonl(threadId, requestOptions = {}) {
       validateThreadId(threadId);
@@ -136,6 +140,7 @@ export {
 } from "./errors.js";
 export {
   ACTIVE_PROVIDER_STATUSES,
+  FIND_SCHEMA_VERSION,
   isActiveProviderStatus,
   isTerminalTurnState,
   LIST_SCHEMA_VERSION,

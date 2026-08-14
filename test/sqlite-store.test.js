@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   createT3SessionClient,
@@ -63,6 +64,89 @@ const REVERSE_CHRONOLOGICAL_THREAD_IDS = [
 
 function cleanupFixture(fixture) {
   fs.rmSync(fixture.directory, { recursive: true, force: true });
+}
+
+const schemasRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas");
+
+function loadSchema(fileName) {
+  return JSON.parse(fs.readFileSync(path.join(schemasRoot, fileName), "utf8"));
+}
+
+// Type-checks a single value against a JSON-schema "type" (a string or a union array), plus
+// integer/array/object refinements the plain typeof operator can't express.
+function typeMatches(value, type) {
+  switch (type) {
+    case "string": return typeof value === "string";
+    case "integer": return Number.isInteger(value);
+    case "number": return typeof value === "number";
+    case "boolean": return typeof value === "boolean";
+    case "null": return value === null;
+    case "object": return typeof value === "object" && value !== null && !Array.isArray(value);
+    case "array": return Array.isArray(value);
+    default: return false;
+  }
+}
+
+function assertDeclaredType(value, propertySchema, label) {
+  const types = Array.isArray(propertySchema.type) ? propertySchema.type : [propertySchema.type];
+  assert.ok(
+    types.some((type) => typeMatches(value, type)),
+    `${label} expected type ${types.join("|")} but got ${JSON.stringify(value)}`,
+  );
+}
+
+function resolveSchemaRef(schema, rootSchema) {
+  if (schema && typeof schema.$ref === "string") {
+    return rootSchema.$defs[schema.$ref.replace("#/$defs/", "")];
+  }
+  return schema;
+}
+
+// A general walk over the subset of JSON Schema this package's bundled schemas actually use:
+// type unions, const, enum, minimum, required, additionalProperties, array items, and $ref.
+// Mirrors the walker used by other test files (e.g. test/participants.test.js) so a schema
+// change is enforced automatically rather than by a hand-listed field check.
+function assertMatchesSchema(value, rawSchema, rootSchema, label) {
+  const schema = resolveSchemaRef(rawSchema, rootSchema);
+
+  if (Object.hasOwn(schema, "const")) {
+    assert.equal(value, schema.const, `${label} must equal ${JSON.stringify(schema.const)}`);
+  }
+  if (schema.type !== undefined) {
+    assertDeclaredType(value, schema, label);
+  }
+  if (schema.enum !== undefined) {
+    assert.ok(schema.enum.includes(value), `${label} outside enum: ${JSON.stringify(value)}`);
+  }
+  if (schema.minimum !== undefined && typeof value === "number") {
+    assert.ok(value >= schema.minimum, `${label} below minimum ${schema.minimum}`);
+  }
+  if (Array.isArray(value) && schema.items !== undefined) {
+    value.forEach((item, index) => assertMatchesSchema(item, schema.items, rootSchema, `${label}[${index}]`));
+  }
+
+  const isPlainObject = typeof value === "object" && value !== null && !Array.isArray(value);
+  if (!isPlainObject || schema.properties === undefined) {
+    return;
+  }
+
+  for (const key of schema.required ?? []) {
+    assert.ok(Object.hasOwn(value, key), `${label} missing required key "${key}"`);
+  }
+  if (schema.additionalProperties === false) {
+    for (const key of Object.keys(value)) {
+      assert.ok(Object.hasOwn(schema.properties, key), `${label} has unexpected key "${key}"`);
+    }
+  }
+  for (const [key, propertySchema] of Object.entries(schema.properties)) {
+    if (Object.hasOwn(value, key)) {
+      assertMatchesSchema(value[key], propertySchema, rootSchema, `${label}.${key}`);
+    }
+  }
+}
+
+function assertValidEnvelope(envelope, schema) {
+  assertMatchesSchema(envelope, schema, schema, "envelope");
 }
 
 test("retrieves and normalizes a complete thread from SQLite", async () => {
@@ -241,20 +325,22 @@ test("finds active titles with normalized results and literal wildcard matching"
 
     const client = await createT3SessionClient({ db: fixture.databasePath });
     const percentMatches = await client.findThreads({ title: "  100%  " });
-    assert.deepEqual(percentMatches.map((match) => match.id), ["percent-thread-0001"]);
-    assert.deepEqual(percentMatches[0].project, {
+    assert.deepEqual(percentMatches.threads.map((match) => match.id), ["percent-thread-0001"]);
+    assert.deepEqual(percentMatches.threads[0].project, {
       title: "Sanitized project",
       workspaceRoot: "/tmp/sanitized-workspace",
     });
+    assert.equal(percentMatches.filters.title, "100%");
+    assert.equal(percentMatches.count, 1);
 
     const underscoreMatches = await client.findThreads({ title: "UNDER_SCORE" });
-    assert.deepEqual(underscoreMatches.map((match) => match.id), ["underscore-thread-0001"]);
+    assert.deepEqual(underscoreMatches.threads.map((match) => match.id), ["underscore-thread-0001"]);
 
     const quoteMatches = await client.findThreads({ title: "o'reilly" });
-    assert.deepEqual(quoteMatches.map((match) => match.id), ["quote-thread-0001"]);
+    assert.deepEqual(quoteMatches.threads.map((match) => match.id), ["quote-thread-0001"]);
 
     const sqlMatches = await client.findThreads({ title: "' OR 1=1 --" });
-    assert.deepEqual(sqlMatches.map((match) => match.id), ["sql-shaped-thread-0001"]);
+    assert.deepEqual(sqlMatches.threads.map((match) => match.id), ["sql-shaped-thread-0001"]);
   } finally {
     cleanupFixture(fixture);
   }
@@ -285,6 +371,33 @@ test("returns a read-only doctor report with schema and counts", async () => {
   } finally {
     cleanupFixture(fixture);
   }
+});
+
+test("a healthy doctor report validates against schemas/doctor.v1.json", async () => {
+  const doctorSchema = loadSchema("doctor.v1.json");
+  const fixture = createFixtureDatabase();
+  const home = path.join(fixture.directory, "home");
+  fs.mkdirSync(path.join(home, "userdata", "logs", "provider"), { recursive: true });
+  try {
+    const client = await createT3SessionClient({ home, db: fixture.databasePath });
+    const report = await client.doctor();
+
+    assert.equal(report.healthy, true);
+    assertValidEnvelope(report, doctorSchema);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("an unhealthy doctor report for a missing database validates against schemas/doctor.v1.json", async () => {
+  const doctorSchema = loadSchema("doctor.v1.json");
+  const client = await createT3SessionClient({ db: "/tmp/t3-session-doctor-missing/state.sqlite" });
+  const report = await client.doctor();
+
+  assert.equal(report.healthy, false);
+  assert.equal(report.databaseReadable, false);
+  assert.equal(report.counts, null);
+  assertValidEnvelope(report, doctorSchema);
 });
 
 test("validates and trims public title-search input before opening SQLite", async () => {
@@ -771,7 +884,8 @@ test("findThreads is oldest-first by default and reverse: true flips it", async 
   try {
     const client = await createT3SessionClient({ db: fixture.databasePath });
     const forward = await client.findThreads({ title: "sanitized" });
-    assert.deepEqual(forward.map((match) => match.id), [
+    assert.equal(forward.ordering.direction, "asc");
+    assert.deepEqual(forward.threads.map((match) => match.id), [
       ACTIVE_THREAD_ID,
       ORPHAN_THREAD_ID,
       WINDOW_THREAD_ID,
@@ -781,7 +895,8 @@ test("findThreads is oldest-first by default and reverse: true flips it", async 
     ]);
 
     const reverse = await client.findThreads({ title: "sanitized", reverse: true });
-    assert.deepEqual(reverse.map((match) => match.id), [
+    assert.equal(reverse.ordering.direction, "desc");
+    assert.deepEqual(reverse.threads.map((match) => match.id), [
       TIE_THREAD_B_ID,
       TIE_THREAD_A_ID,
       WINDOW_THREAD_ID,
@@ -805,7 +920,49 @@ test("findThreads is oldest-first by default and reverse: true flips it", async 
     );
     database.close();
     const percentMatches = await client.findThreads({ title: "100%", reverse: true });
-    assert.deepEqual(percentMatches.map((match) => match.id), ["reverse-percent-thread-0001"]);
+    assert.deepEqual(percentMatches.threads.map((match) => match.id), ["reverse-percent-thread-0001"]);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("a findThreads envelope validates against schemas/find.v1.json", async () => {
+  const findSchema = loadSchema("find.v1.json");
+  const fixture = createFixtureDatabase();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const result = await client.findThreads({ title: "sanitized" });
+    assert.ok(result.threads.length > 0);
+    assertValidEnvelope(result, findSchema);
+
+    const empty = await client.findThreads({ title: "no-such-title-anywhere" });
+    assert.equal(empty.threads.length, 0);
+    assertValidEnvelope(empty, findSchema);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("find and list share the exact same per-thread field set", async () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const found = await client.findThreads({ title: "sanitized" });
+    const listed = await client.listThreads({});
+
+    assert.ok(found.threads.length > 0);
+    assert.ok(listed.threads.length > 0);
+
+    const listFields = Object.keys(listed.threads[0]).sort();
+    for (const thread of found.threads) {
+      assert.deepEqual(Object.keys(thread).sort(), listFields);
+    }
+
+    // The same thread reached through either command must carry identical values, not just
+    // the same key set.
+    const activeFromFind = found.threads.find((thread) => thread.id === ACTIVE_THREAD_ID);
+    const activeFromList = listed.threads.find((thread) => thread.id === ACTIVE_THREAD_ID);
+    assert.deepEqual(activeFromFind, activeFromList);
   } finally {
     cleanupFixture(fixture);
   }
