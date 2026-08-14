@@ -20,10 +20,12 @@ Every command shares this set; sections below note only the codes reachable from
 | --- | --- | --- |
 | 0 | Success | Normal output, or a valid empty result (e.g. an offset past the end) |
 | 1 | Unexpected failure | Any error not classified below |
-| 2 | Thread not found | `get`/`participants`/`tail` on an ID that matches nothing; `tail` when the thread disappears mid-run |
-| 3 | Invalid arguments | Rejected or malformed options; validated before SQLite is opened |
+| 2 | Thread not found | `get`/`participants`/`tail` on an ID that matches nothing; `tail` when the thread disappears mid-run; `get`/`participants` with an exact `--turn` that matches nothing (see below) |
+| 3 | Invalid arguments | Rejected or malformed options; validated before SQLite is opened; a failed `install` (conflicting or invalid target) |
 | 4 | Database unavailable | Missing/unreadable database, missing projection schema, unreadable provider log, or a `tail` cycle that exhausts its retries |
 | 5 | Raw JSONL partially unreadable | `get --raw-jsonl` hit at least one malformed provider line; valid records are still emitted on stdout, diagnostics on stderr |
+
+`get` and `participants` can exit 2 while still emitting a complete envelope on stdout — the same emit-then-exit-non-zero pattern `doctor` uses for a failed diagnostic. This happens only for an exact `--turn` that matches no turn: the envelope carries a `TURN_NOT_FOUND` warning, `turns`/`participants` empty, and the process exits 2. A missing *thread* (`get <bad-id>`) is the older case: nothing on stdout, `t3-session.error.v1` on stderr, exit 2. Do not treat every exit 2 as "nothing was printed" — check whether stdout has content first.
 
 ## List threads
 
@@ -39,17 +41,47 @@ Options:
 - `--project <text>` — match `projection_projects.title` case-insensitively; exact match on the trimmed title, not a substring search. Trimmed and rejected as invalid if empty.
 - `--since <timestamp>` — inclusive lower bound on `updated_at`, ISO-8601.
 - `--before <timestamp>` — exclusive upper bound on `updated_at`, ISO-8601. Adjacent `--since`/`--before` windows compose without overlap or double counting.
-- `--limit <n>` — maximum threads returned; default 50; non-negative integer.
-- `--offset <n>` — skip matching threads before applying `--limit`; default 0; non-negative integer.
+- `--limit <n>` — maximum threads returned; default 50; must be a positive integer (1 or greater) — `--limit 0` is rejected, not treated as "return nothing".
+- `--offset <n>` — skip matching threads before applying `--limit`; default 0; non-negative integer (0 is valid).
 - `--reverse` — newest-first instead of the default oldest-first.
 
 Timezone rule for `--since`/`--before`: a date-time with no UTC offset is interpreted as **UTC**, not the host's local zone — matching the date-only form (already UTC) and matching UTC storage. `--since 2026-08-10T09:00` and `--since 2026-08-10T09:00Z` are identical. The space-separated form `--since "2026-08-10 09:00"` is treated the same way. `Z` and explicit `+HH:MM`/`-HH:MM` offsets are parsed as given, unchanged.
 
-Invalid timestamps, limits, offsets, or an empty project filter produce the existing machine-readable `t3-session.error.v1` error before SQLite is opened.
+Invalid timestamps, a zero or negative limit, a negative offset, or an empty project filter produce the existing machine-readable `t3-session.error.v1` error before SQLite is opened. A zero limit fails with `"limit must be a positive integer."`; a negative numeric value on any option fails with `"<option> does not accept a negative value."` (e.g. `--offset -1` → `"--offset does not accept a negative value."`) rather than the older, misleading `"Missing value for <option>."`, which is now reserved for an actually-absent value.
 
 Ordering: sorted by `updated_at`, then by `thread_id` as a tie-breaker, in the same direction as `--reverse`. Threads with a null `updated_at` sort last in both directions and are excluded entirely when `--since` or `--before` is used, because a null timestamp cannot satisfy a bound. Deleted threads (`deleted_at IS NOT NULL`) are always excluded.
 
 Output: `--format json` and `--format jsonl` emit the `t3-session.list.v1` envelope — `schemaVersion`, `toolVersion`, `filters` (`project`, `since`, `before`), `ordering` (`sortBy: "updatedAt"`, `direction`), `limit`, `offset`, `count`, `hasMore`, and `threads` (metadata-only summaries: `id`, `projectId`, `title`, `project`, `branch`, `worktreePath`, `createdAt`, `updatedAt`, `latestUserMessageAt`, `latestTurnId`). Listing output never contains message or activity text. `hasMore` indicates whether another page is available past `offset + limit`; page forward by increasing `--offset`.
+
+`list --format json` (truncated to one thread; a real page returns up to `limit`):
+
+```json
+{
+  "schemaVersion": "t3-session.list.v1",
+  "toolVersion": "0.2.0",
+  "filters": { "project": null, "since": null, "before": null },
+  "ordering": { "sortBy": "updatedAt", "direction": "asc" },
+  "limit": 50,
+  "offset": 0,
+  "count": 7,
+  "hasMore": false,
+  "threads": [
+    {
+      "id": "THREAD_ID",
+      "projectId": "project-1",
+      "title": "Example thread title",
+      "project": { "title": "Example project", "workspaceRoot": "/path/to/workspace" },
+      "branch": "main",
+      "worktreePath": "/path/to/worktree",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:02:00.000Z",
+      "latestUserMessageAt": "2026-01-01T00:01:00.000Z",
+      "latestTurnId": "turn-2"
+    }
+    // ...remaining threads, same shape
+  ]
+}
+```
 
 ## Retrieve a thread
 
@@ -71,7 +103,7 @@ The default format shows thread metadata, provider metadata, turns, messages, ac
 
 - `--last-turn` — the newest turn and its associated records; shorthand for a one-turn newest-side window.
 - `--turn <turn-id>` — one exact turn and its associated records.
-- `--turn-limit <n>` — a bounded window of turns counted from the newest side; non-negative integer; defaults to 1 when only `--turn-offset` is given.
+- `--turn-limit <n>` — a bounded window of turns counted from the newest side; must be a positive integer (1 or greater) — `--turn-limit 0` is rejected; defaults to 1 when only `--turn-offset` is given.
 - `--turn-offset <n>` — skip turns from the newest side before applying `--turn-limit`; non-negative integer; default 0.
 
 Mutually exclusive combinations, rejected with the machine-readable invalid-arguments error:
@@ -79,9 +111,74 @@ Mutually exclusive combinations, rejected with the machine-readable invalid-argu
 - `--turn` cannot be combined with `--last-turn`, `--turn-limit`, or `--turn-offset`.
 - `--last-turn` cannot be combined with `--turn-limit` or `--turn-offset`.
 
-Selection: turns are selected from the newest side, then always emitted in chronological order. For each selected turn, the window includes the turn row, activities whose `turn_id` matches, and messages reached through `pending_message_id`, `assistant_message_id`, or a matching `turn_id`. Projected user prompts are stored with a null `turn_id`, so they are only reachable through `pending_message_id` — this is why `--last-turn` still includes the user prompt that started the turn. Records reached through more than one association path are deduplicated by ID. An offset past the end, or a `--turn` ID that matches nothing, is a valid empty window: it returns a normalized thread with empty `turns`, `messages`, and `activities`, not a missing-thread error. Plain `get <thread-id>` with none of these options is unchanged and returns the full history.
+Selection: turns are selected from the newest side, then always emitted in chronological order. For each selected turn, the window includes the turn row, activities whose `turn_id` matches, and messages reached through `pending_message_id`, `assistant_message_id`, or a matching `turn_id`. Projected user prompts are stored with a null `turn_id`, so they are only reachable through `pending_message_id` — this is why `--last-turn` still includes the user prompt that started the turn. Records reached through more than one association path are deduplicated by ID. Plain `get <thread-id>` with none of these options is unchanged and returns the full history.
+
+**Empty selection: two different meanings.** These look the same at first glance (empty `turns`) but are not the same condition, and the distinction is deliberate:
+
+| Selection | Empty result means | Warnings | Exit code |
+| --- | --- | --- | --- |
+| `--turn <turn-id>` (exact) matches no turn | The turn ID does not exist in this thread — likely a stale or wrong ID | `TURN_NOT_FOUND` added to `warnings`, with `details.turnId` | 2 |
+| `--turn-limit`/`--turn-offset`/`--last-turn` (a turn *window*) whose page lands past the end | A valid empty page, exactly like a `list` offset past the end | none | 0 |
+
+`TURN_NOT_FOUND` fires for both `get` and `participants`. In both cases the full envelope is still emitted on stdout — `turns: []` (or `participants: []`), `selection.selectedTurnIds: []` — so a consumer must check `warnings`, not just the exit code, to know which case it is. Do not treat an exit-2, envelope-bearing response the same as the older missing-thread exit 2, which prints nothing on stdout.
 
 Bounded output carries a `selection` object on the normalized thread: `kind` (`"turn"` or `"turn-window"`), `turnId`, `turnLimit`, `turnOffset`, `totalTurns`, `selectedTurnIds`. Full retrieval omits `selection` entirely — its presence is the machine-readable signal that output is partial. Human output for a bounded read adds a `Selection` block with `Partial history: yes` and renames the sections `Turns (partial)`, `Messages (partial)`, `Activities (partial)`.
+
+`get --last-turn --format json` (messages/activities elided — see [Live state](#live-state) below for the full `liveState` block):
+
+```json
+{
+  "schemaVersion": "t3-session.thread.v1",
+  "toolVersion": "0.2.0",
+  "thread": { "id": "THREAD_ID", "title": "Example thread title", "...": "..." },
+  "turns": [
+    { "turnId": "turn-2", "state": "completed", "requestedAt": "2026-01-01T00:01:00.000Z", "...": "..." }
+  ],
+  "messages": [ /* elided */ ],
+  "activities": [ /* elided */ ],
+  "provider": { "providerName": "ExampleProvider", "status": "ready", "...": "..." },
+  "liveState": { "status": "idle", "complete": true, "reasons": [], "...": "..." },
+  "warnings": [],
+  "selection": {
+    "kind": "turn",
+    "turnId": null,
+    "turnLimit": 1,
+    "turnOffset": 0,
+    "totalTurns": 2,
+    "selectedTurnIds": ["turn-2"]
+  }
+}
+```
+
+`get --turn does-not-exist-id --format json` (TURN_NOT_FOUND; exit 2, full envelope still printed):
+
+```json
+{
+  "schemaVersion": "t3-session.thread.v1",
+  "toolVersion": "0.2.0",
+  "thread": { "id": "THREAD_ID", "...": "..." },
+  "turns": [],
+  "messages": [],
+  "activities": [],
+  "provider": { "...": "..." },
+  "liveState": { "...": "..." },
+  "warnings": [
+    {
+      "code": "TURN_NOT_FOUND",
+      "message": "No turn matched the requested turn ID.",
+      "details": { "turnId": "does-not-exist-id" }
+    }
+  ],
+  "selection": {
+    "kind": "turn",
+    "turnId": "does-not-exist-id",
+    "turnLimit": null,
+    "turnOffset": null,
+    "totalTurns": 3,
+    "selectedTurnIds": []
+  }
+}
+```
 
 ### Live state
 
@@ -115,10 +212,18 @@ Options:
 - `--interval <ms>` — poll interval in milliseconds; default 1000; validated as an integer from 100 to 60000 inclusive, rejected outside that range before SQLite is opened.
 - `--max-cycles <n>` — stop after `n` poll cycles. Usable together with `--timeout`; whichever fires first stops the tail.
 - `--timeout <ms>` — stop after a wall-clock duration in milliseconds. Usable together with `--max-cycles`.
-- `--turn-limit <n>` — bound each poll cycle to the newest `n` turns; reuses the same `normalizeCount`-validated window machinery as `get --turn-limit`.
+- `--turn-limit <n>` — bound each poll cycle to the newest `n` turns; reuses the same `normalizePositiveCount`-validated window machinery as `get --turn-limit` — must be a positive integer, `0` is rejected.
 - `--format jsonl|json` — `jsonl` is the default, one record per line. `json` buffers the whole run into a single JSON array and is only accepted with a bounded tail (`--once`, `--max-cycles`, or `--timeout`); an unbounded tail with `--format json` is rejected because it would never finish.
 
 With none of `--once`, `--max-cycles`, or `--timeout` given, `tail` follows indefinitely until interrupted — the only unbounded loop in the package. `tail` rejects `--title`, `--raw-jsonl`, and every `list`-only filter option, following the same per-command rejection rules as other commands.
+
+`tail <thread-id> --once --format jsonl` (three lines of a longer stream — an `upsert`, another `upsert` with a different `recordType`, then the terminating `end` record):
+
+```jsonl
+{"schemaVersion":"t3-session.tail-record.v1","op":"upsert","recordType":"turn","threadId":"THREAD_ID","observedAt":"2026-08-14T15:01:22.958Z","cycle":1,"data":{"turnId":"turn-2","state":"completed","...":"..."}}
+{"schemaVersion":"t3-session.tail-record.v1","op":"upsert","recordType":"message","threadId":"THREAD_ID","observedAt":"2026-08-14T15:01:22.958Z","cycle":1,"data":{"messageId":"message-2","role":"assistant","text":"Example answer","...":"..."}}
+{"schemaVersion":"t3-session.tail-record.v1","op":"end","recordType":"end","threadId":"THREAD_ID","observedAt":"2026-08-14T15:01:22.958Z","cycle":1,"data":{"reason":"once","cycles":1}}
+```
 
 ### Tail record contract
 
@@ -169,15 +274,15 @@ Options:
 
 - `--tree` — emit a nested tree instead of a flat array. Supported with `--format json` and `--format human`; rejected with `--format jsonl`, because JSONL is a flat one-record-per-line contract and a nested tree cannot be expressed in it without inventing a second envelope. `--tree` on a thread with no explicit parentage returns every participant as a root — that is correct output, not an error.
 - `--last-turn` — only participants whose activities touch the newest turn; shorthand for a one-turn newest-side window (`selection.kind: "turn-window"`, `turnLimit: 1`, `turnOffset: 0`), the same resolution `get --last-turn` uses. Shares `get`'s mutual-exclusivity rule: cannot be combined with `--turn`, `--turn-limit`, or `--turn-offset`.
-- `--turn <turn-id>` — only participants whose activities touch that turn.
-- `--turn-limit <n>` — only participants touching the newest `n` turns.
-- `--turn-offset <n>` — skip turns from the newest side before applying `--turn-limit`.
-- `--limit <n>` — maximum participants returned; **no default**, so the full participant list is returned unless a smaller page is explicitly requested.
+- `--turn <turn-id>` — only participants whose activities touch that turn. An exact `--turn` that matches no turn is the same `TURN_NOT_FOUND` condition documented under `get`'s [Bounded retrieval](#bounded-retrieval): the envelope still emits with `participants: []`, a `TURN_NOT_FOUND` warning, and exit 2.
+- `--turn-limit <n>` — only participants touching the newest `n` turns; must be a positive integer (1 or greater) — `0` is rejected.
+- `--turn-offset <n>` — skip turns from the newest side before applying `--turn-limit`. A turn-window page past the end (unlike an exact `--turn` miss) is a silent, valid empty page — no warning, exit 0.
+- `--limit <n>` — maximum participants returned; **no default**, so the full participant list is returned unless a smaller page is explicitly requested; must be a positive integer when given — `0` is rejected.
 - `--offset <n>` — skip matching participants before applying `--limit`; default 0.
 - `--reverse` — newest-first instead of the default oldest-first.
 - `--format human|json|jsonl`.
 
-`--last-turn`, `--turn`, `--turn-limit`, and `--turn-offset` reuse the same `normalizeTurnSelection` validation as `get`, and `--limit`/`--offset` reuse `normalizeCount`; all validation runs before SQLite is opened. `participants` rejects `--title`, `--raw-jsonl`, `--once`, `--interval`, `--max-cycles`, `--timeout`, and the `list`-only filters `--project`, `--since`, `--before`, following the same per-command rejection rules as other commands.
+`--last-turn`, `--turn`, `--turn-limit`, and `--turn-offset` reuse the same `normalizeTurnSelection` validation as `get`, and `--limit` reuses `normalizePositiveCount` (`--offset` still uses `normalizeCount`, non-negative); all validation runs before SQLite is opened. `participants` rejects `--title`, `--raw-jsonl`, `--once`, `--interval`, `--max-cycles`, `--timeout`, and the `list`-only filters `--project`, `--since`, `--before`, following the same per-command rejection rules as other commands.
 
 A `task.*` activity recorded with a null `turn_id` can never appear in any turn-bounded read (`--turn`, `--turn-limit`, `--turn-offset`, `--last-turn`): the underlying query matches selected turns with `turn_id IN (...)`, and SQL `NULL` never satisfies an `IN` list. This is deliberate and matches how `get` bounds its own turn windows on `turn_id`. It is a real, observed condition, not an edge case: roughly 98 of 6,338 observed `task.*` rows carry a null `turn_id`. A participant missing from a bounded view is not necessarily missing from the thread — re-run without turn selection to check the whole thread before concluding a participant is absent.
 
@@ -225,6 +330,8 @@ A task whose `parentAgentId` equals its own `taskId` resolves — the identifier
 
 `details.taskIds` (sorted) lists the affected **child** task IDs for `PARENT_OUT_OF_SELECTION`, `PARENT_CYCLE`, and `PARENT_OUT_OF_PAGE`. `UNRESOLVED_PARENT` is emitted once per occurrence with `details: { taskId, parentAgentId }` instead of an aggregated list. A child reported under `PARENT_OUT_OF_SELECTION` is never also named by `PARENT_OUT_OF_PAGE` for the same missing parent — the two codes split the same "parent not in view" condition by cause (turn window vs. page).
 
+The table above covers only hierarchy warnings, all scoped to individual participants. One more warning code can appear in `participants`' `warnings` array and is not about hierarchy at all: `TURN_NOT_FOUND` — an exact `--turn` that matches no turn in the thread, `details: { turnId }`, `participants: []`, exit 2. See the empty-selection table under `get`'s [Bounded retrieval](#bounded-retrieval); `participants` follows the identical rule.
+
 ### Envelope and exit codes
 
 `--format json` and `--format jsonl` emit `t3-session.participants.v1`: `schemaVersion`, `toolVersion`, `threadId`, `ordering`, `selection` (`null` for a whole-thread read, otherwise the turn selection), `counts`, `hierarchyAvailable`, `participants`, and `warnings`. `--format jsonl` emits `t3-session.jsonl-record.v1` records: a `participants` header record carrying the envelope metadata, followed by one `participant` record per participant.
@@ -246,7 +353,85 @@ Exit codes (see [Exit codes](#exit-codes)):
 
 - A thread that exists but has no task activities returns a valid envelope with an empty `participants` array, `counts.participants: 0`, and `hierarchyAvailable: false` — exit 0, not an error.
 - A missing thread is `ThreadNotFoundError`, exit 2, nothing on stdout, exactly as `get`.
+- An exact `--turn` that matches no turn returns a valid envelope with `TURN_NOT_FOUND` in `warnings` and `participants: []` — exit 2, but with a full envelope on stdout, unlike the missing-thread case above.
 - Rejected or invalid options return the existing machine-readable `t3-session.error.v1` error, exit 3.
+
+`participants --format json` (flat, no turn selection):
+
+```json
+{
+  "schemaVersion": "t3-session.participants.v1",
+  "toolVersion": "0.2.0",
+  "threadId": "THREAD_ID",
+  "ordering": { "sortBy": "firstSeenAt", "direction": "asc" },
+  "selection": null,
+  "counts": { "total": 3, "participants": 3, "roots": 3, "withExplicitParent": 0, "unresolvedParents": 0 },
+  "hierarchyAvailable": false,
+  "participants": [
+    {
+      "taskId": "task-alpha",
+      "parentTaskId": null,
+      "path": "main.subagent1",
+      "depth": 0,
+      "title": "Example task",
+      "role": "general-purpose",
+      "status": "completed",
+      "state": "finished",
+      "turnId": "turn-1",
+      "turnIds": ["turn-1"],
+      "firstSeenAt": "2026-03-01T00:00:20.000Z",
+      "lastSeenAt": "2026-03-01T00:00:40.000Z",
+      "activityCount": 3,
+      "usage": { "totalTokens": 1500, "toolUses": 5, "durationMs": 6000 }
+      // ...remaining fields from "Participant fields" above, e.g. model, agentKind, error
+    }
+    // ...remaining participants, same shape
+  ],
+  "warnings": []
+}
+```
+
+`participants --tree --format json` (nested; `path`/`depth` shown at each level, one `UNRESOLVED_PARENT` warning included to show its shape):
+
+```json
+{
+  "schemaVersion": "t3-session.participants.v1",
+  "toolVersion": "0.2.0",
+  "threadId": "THREAD_ID",
+  "ordering": { "sortBy": "firstSeenAt", "direction": "asc" },
+  "selection": null,
+  "counts": { "total": 2, "participants": 2, "roots": 1, "withExplicitParent": 1, "unresolvedParents": 1 },
+  "hierarchyAvailable": true,
+  "participants": [
+    {
+      "taskId": "root-task",
+      "parentTaskId": null,
+      "path": "main.subagent1",
+      "depth": 0,
+      "title": "Root",
+      "...": "...",
+      "children": [
+        {
+          "taskId": "child-task",
+          "parentTaskId": "root-task",
+          "path": "main.subagent1.subagent1a",
+          "depth": 1,
+          "title": "Child",
+          "...": "...",
+          "children": []
+        }
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "code": "UNRESOLVED_PARENT",
+      "message": "A task recorded a parent that does not resolve to a known participant.",
+      "details": { "taskId": "orphan-task", "parentAgentId": "missing-parent-task" }
+    }
+  ]
+}
+```
 
 ## Search and diagnose
 
@@ -258,7 +443,49 @@ t3-session doctor
 t3-session doctor --format json
 ```
 
-Title search is trimmed, case-insensitive, parameterized, excludes deleted threads, and does not search message content. `find` defaults to oldest-first chronological order and takes `--reverse` for newest-first, the same meaning `--reverse` has for `list`. Its result shape is a bare array and is unchanged; `list` is the envelope-based, paginated command. Doctor reports the resolved home, database readability, schema health, counts, WAL presence, provider-log directory, runtime, and package version.
+Title search is trimmed, case-insensitive, parameterized, excludes deleted threads, and does not search message content — use `find` when the task provides a title fragment, not an exact thread ID. `find` defaults to oldest-first chronological order and takes `--reverse` for newest-first, the same meaning `--reverse` has for `list`. `find` supports `--format human` and `--format json` only — no `--format jsonl`. `find` has no `--limit`/`--offset`; it always returns every match, and there is deliberately no `limit`/`offset`/`hasMore` in its output for that reason. Doctor reports the resolved home, database readability, schema health, counts, WAL presence, provider-log directory, runtime, and package version.
+
+`find --format json` emits the `t3-session.find.v1` envelope — `schemaVersion`, `toolVersion`, `filters.title`, `ordering` (`sortBy: "updatedAt"`, `direction`), `count`, and `threads`. Each entry in `threads` is the **same per-thread shape** `list` returns (`id`, `projectId`, `title`, `project`, `branch`, `worktreePath`, `createdAt`, `updatedAt`, `latestUserMessageAt`, `latestTurnId`) — metadata only, never message or activity text.
+
+```json
+{
+  "schemaVersion": "t3-session.find.v1",
+  "toolVersion": "0.2.0",
+  "filters": { "title": "topic" },
+  "ordering": { "sortBy": "updatedAt", "direction": "asc" },
+  "count": 2,
+  "threads": [
+    {
+      "id": "THREAD_ID",
+      "projectId": "project-1",
+      "title": "Example thread about the topic",
+      "project": { "title": "Example project", "workspaceRoot": "/path/to/workspace" },
+      "branch": "main",
+      "worktreePath": "/path/to/worktree",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:02:00.000Z",
+      "latestUserMessageAt": "2026-01-01T00:01:00.000Z",
+      "latestTurnId": "turn-2"
+    }
+    // ...remaining matches, same shape
+  ]
+}
+```
+
+**Breaking change from `0.1.0`:** `find --format json` published as a bare array of matches in `0.1.0`. It is now this envelope. A consumer parsing the old shape must migrate to reading `.threads` instead of iterating the top-level value directly.
+
+An `error.v1` example (the shape every command's stderr error, and every non-zero-exit failure that doesn't emit a full envelope, uses):
+
+```json
+{
+  "schemaVersion": "t3-session.error.v1",
+  "code": "INVALID_ARGUMENTS",
+  "message": "limit must be a positive integer.",
+  "details": { "field": "limit", "value": "0" }
+}
+```
+
+`error.v1` carries `schemaVersion` only, not `toolVersion` — `tail-record.v1` and per-line `jsonl-record.v1` records are the same way. `toolVersion` is present on `thread.v1`, `list.v1`, `find.v1`, `participants.v1`, and the `doctor` report; see the "Schema and compatibility policy" section of the top-level `README.md` for the full breakdown.
 
 ## Schemas
 
@@ -269,6 +496,8 @@ t3-session schema jsonl-record.v1
 t3-session schema list.v1
 t3-session schema tail-record.v1
 t3-session schema participants.v1
+t3-session schema doctor.v1
+t3-session schema find.v1
 ```
 
 Schema output is written to stdout and is suitable for redirecting into a fixture or validator.
@@ -282,7 +511,7 @@ t3-session install --skills claude
 t3-session install --skills codex
 ```
 
-Destinations are `~/.claude/skills/t3-session` for Claude and `$CODEX_HOME/skills/t3-session`, or `~/.codex/skills/t3-session` when `CODEX_HOME` is unset.
+Destinations are `~/.claude/skills/t3-session` for Claude and `$CODEX_HOME/skills/t3-session`, or `~/.codex/skills/t3-session` when `CODEX_HOME` is unset. Alongside `SKILL.md` and `references/`, the installed directory carries `agents/openai.yaml` — a small Codex-style agent-interface metadata stub (display name, short description, default prompt) bundled with the skill; it is not a command reference and does not need to be read to use the CLI.
 
 An existing destination is never silently removed. Choose one explicit replacement policy:
 
@@ -293,3 +522,5 @@ t3-session install --skills codex --backup
 ```
 
 `--overwrite` replaces the existing directory. `--backup` moves it to a timestamped sibling backup before installing. The installer copies only the package's allowlisted skill files and rejects a missing or malformed source bundle.
+
+`install` fails with exit 3 (not 2 or 4) in two cases: the destination already exists and neither `--overwrite` nor `--backup` was given (`"The destination already exists; pass --overwrite or --backup to replace it."`), or the target itself is invalid — an unsupported `--skills` value, a symlinked skills directory, or a resolved path that escapes the selected skills directory. Both surface as a `t3-session.error.v1` error on stderr, exit 3, same as any other rejected-arguments case.

@@ -71,6 +71,16 @@ Confirm the returned ID before retrieving it. Deleted threads are excluded from 
 
 An empty `threads` array from `list` can mean the offset ran past the end of the result set, or that `--since`/`--before` excluded threads with a null `updated_at` (a null timestamp cannot satisfy either bound). Check `count`, `hasMore`, `limit`, and `offset` in the response before concluding there is no match. Retry with a smaller `--offset`, a wider `--since`/`--before` window, or without `--since`/`--before` entirely.
 
+## An exact --turn matches nothing
+
+`get THREAD_ID --turn TURN_ID` and `participants THREAD_ID --turn TURN_ID` treat a turn ID that does not exist in the thread as a reportable condition, not a silent empty result: the envelope still comes back in full, but with a `TURN_NOT_FOUND` warning in `warnings` (`details.turnId` names the ID that missed) and exit code 2.
+
+```bash
+t3-session get THREAD_ID --turn TURN_ID --format json
+```
+
+This is different from a turn-*window* (`--turn-limit`, `--turn-offset`, `--last-turn`) whose page lands past the end of the thread — that case is a valid empty page, exactly like an empty `list` page: no warning, exit 0. Before concluding a turn ID is wrong, confirm which kind of selection produced the empty result — check `warnings`, not just whether `turns`/`participants` came back empty. Do not retry an exact `--turn` miss by guessing another ID; report the mismatch and ask for the correct turn ID or re-run without turn selection.
+
 ## Project filter matches nothing
 
 `--project` is an exact, case-insensitive match on the trimmed project title, not a substring search. If it returns nothing, retry `t3-session list` without `--project` and inspect the `project.title` values in the results, or use `t3-session find --title "..."` for substring matching against thread titles.

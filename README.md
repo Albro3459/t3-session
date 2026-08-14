@@ -33,7 +33,7 @@ import { createT3SessionClient } from "@albro3459/t3-session";
 const client = await createT3SessionClient({ home: process.env.T3_HOME });
 const thread = await client.getThread("THREAD_ID");
 const recentTurn = await client.getThread("THREAD_ID", { lastTurn: true });
-const matches = await client.findThreads({ title: "topic" });
+const found = await client.findThreads({ title: "topic" }); // { schemaVersion, filters, ordering, count, threads }
 const page = await client.listThreads({ project: "CodeLaunch", since: "2026-08-10", limit: 20 });
 
 const tail = client.tailThread("THREAD_ID", { maxCycles: 5, turnLimit: 2 });
@@ -68,13 +68,13 @@ Supported options:
 --project <text>       Match a project title, case-insensitively (exact match on the trimmed title, not a substring search)
 --since <timestamp>    Inclusive lower bound on updated_at, ISO-8601
 --before <timestamp>   Exclusive upper bound on updated_at, ISO-8601
---limit <n>            Maximum threads returned; default 50
+--limit <n>            Maximum threads returned; default 50; must be a positive integer (0 is rejected)
 --offset <n>           Skip matching threads before applying --limit
 --reverse              Newest-first instead of the default oldest-first
 --format human|json|jsonl
 ```
 
-The default limit is 50, so a listing cannot be retrieved unbounded by accident; pass `--limit` to request a different page size. Ordering is deterministic: threads are sorted by `updated_at`, then by `thread_id` as a tie-breaker in the same direction. Threads with a null `updated_at` sort last in both the default and `--reverse` order, and are excluded entirely when `--since` or `--before` is used, since a null timestamp cannot satisfy a bound. `--since` is inclusive and `--before` is exclusive, so adjacent time windows compose without overlapping or double counting. An ISO-8601 date-time given without a UTC offset — including the space-separated form, e.g. `2026-08-10 09:00` — is interpreted as UTC, matching the date-only form and UTC storage. Deleted threads are excluded. `--format json` and `--format jsonl` emit the `t3-session.list.v1` envelope, which reports `filters`, `ordering`, `limit`, `offset`, `count`, and `hasMore` alongside the returned `threads`. Use `hasMore` with `--offset` to page through results. Listing output contains thread metadata only — it never includes message or activity text.
+The default limit is 50, so a listing cannot be retrieved unbounded by accident; pass `--limit` to request a different page size. `--limit 0` is rejected with `"limit must be a positive integer."` rather than silently returning nothing. A negative value on any numeric option (`--limit -1`, `--offset -1`, and so on) is rejected with `"<option> does not accept a negative value."` Ordering is deterministic: threads are sorted by `updated_at`, then by `thread_id` as a tie-breaker in the same direction. Threads with a null `updated_at` sort last in both the default and `--reverse` order, and are excluded entirely when `--since` or `--before` is used, since a null timestamp cannot satisfy a bound. `--since` is inclusive and `--before` is exclusive, so adjacent time windows compose without overlapping or double counting. An ISO-8601 date-time given without a UTC offset — including the space-separated form, e.g. `2026-08-10 09:00` — is interpreted as UTC, matching the date-only form and UTC storage. Deleted threads are excluded. `--format json` and `--format jsonl` emit the `t3-session.list.v1` envelope, which reports `filters`, `ordering`, `limit`, `offset`, `count`, and `hasMore` alongside the returned `threads`. Use `hasMore` with `--offset` to page through results. Listing output contains thread metadata only — it never includes message or activity text.
 
 ## Retrieve a thread
 
@@ -94,11 +94,13 @@ Bounded retrieval options limit `get` to a window of turns instead of the full h
 ```text
 --last-turn            The newest turn and its associated records (shorthand for a one-turn newest-side window)
 --turn <turn-id>       One exact turn and its associated records
---turn-limit <n>       A bounded window of turns counted from the newest side (defaults to 1 when only --turn-offset is given)
+--turn-limit <n>       A bounded window of turns counted from the newest side (defaults to 1 when only --turn-offset is given; must be a positive integer, 0 is rejected)
 --turn-offset <n>      Skip turns from the newest side before applying --turn-limit
 ```
 
-`--turn` cannot be combined with `--last-turn`, `--turn-limit`, or `--turn-offset`; `--last-turn` cannot be combined with `--turn-limit` or `--turn-offset`. Turns are selected from the newest side but always emitted in chronological order. A window includes the turn row, the activities whose `turn_id` matches, and the messages reached through `pending_message_id`, `assistant_message_id`, or a matching `turn_id` — this includes projected user prompts, which are stored with a null `turn_id`, so `--last-turn` still includes the user prompt that started the turn. An offset past the end, or a `--turn` ID that matches nothing, returns a normalized thread with empty `turns`, `messages`, and `activities`, not a missing-thread error. Plain `t3-session get THREAD_ID` is unchanged and still returns the full history.
+`--turn` cannot be combined with `--last-turn`, `--turn-limit`, or `--turn-offset`; `--last-turn` cannot be combined with `--turn-limit` or `--turn-offset`. Turns are selected from the newest side but always emitted in chronological order. A window includes the turn row, the activities whose `turn_id` matches, and the messages reached through `pending_message_id`, `assistant_message_id`, or a matching `turn_id` — this includes projected user prompts, which are stored with a null `turn_id`, so `--last-turn` still includes the user prompt that started the turn. Plain `t3-session get THREAD_ID` is unchanged and still returns the full history.
+
+A turn-window page past the end (`--turn-limit`/`--turn-offset`/`--last-turn`) is a valid empty page — empty `turns`/`messages`/`activities`, no warning, exit 0 — the same as an empty `list` page. An exact `--turn <turn-id>` that matches nothing is different: it is reported, not silent. The envelope still comes back in full, but with a `TURN_NOT_FOUND` warning (`details.turnId`) in `warnings`, and the process exits 2. This applies to both `get` and `participants`. See `skills/t3-session/references/cli.md` for the full table.
 
 Bounded results are machine-detectable: the normalized thread gains a `selection` object (`kind`, `turnId`, `turnLimit`, `turnOffset`, `totalTurns`, `selectedTurnIds`). Full retrieval omits `selection` entirely, so existing consumers are unaffected. Human output for a bounded read shows a `Selection` block with `Partial history: yes` and labels the sections `Turns (partial)`, `Messages (partial)`, and `Activities (partial)`.
 
@@ -137,7 +139,7 @@ Supported options:
 --interval <ms>        Poll interval in milliseconds; default 1000; integer from 100 to 60000 inclusive
 --max-cycles <n>       Stop after n poll cycles
 --timeout <ms>         Stop after a wall-clock duration, in milliseconds
---turn-limit <n>       Bound each poll to the newest n turns, reusing the get --turn-limit machinery
+--turn-limit <n>       Bound each poll to the newest n turns, reusing the get --turn-limit machinery (must be a positive integer, 0 is rejected)
 --format jsonl|json    Output format; jsonl is the default
 ```
 
@@ -185,15 +187,15 @@ Supported options:
 --tree                 Emit a nested tree instead of a flat array
 --last-turn            Only participants whose activities touch the newest turn
 --turn <turn-id>       Only participants whose activities touch that turn
---turn-limit <n>       Only participants touching the newest n turns
+--turn-limit <n>       Only participants touching the newest n turns (must be a positive integer, 0 is rejected)
 --turn-offset <n>      Skip turns from the newest side before --turn-limit
---limit <n>            Maximum participants returned; no default
+--limit <n>            Maximum participants returned; no default; must be a positive integer when given, 0 is rejected
 --offset <n>           Skip matching participants before applying --limit
 --reverse              Newest-first instead of the default oldest-first
 --format human|json|jsonl
 ```
 
-`--last-turn` is shorthand for a one-turn newest-side window (`selection.kind: "turn-window"`, `turnLimit: 1`, `turnOffset: 0`) — the same resolution `get --last-turn` uses. It shares `get`'s mutual-exclusivity rule: it cannot be combined with `--turn`, `--turn-limit`, or `--turn-offset`.
+`--last-turn` is shorthand for a one-turn newest-side window (`selection.kind: "turn-window"`, `turnLimit: 1`, `turnOffset: 0`) — the same resolution `get --last-turn` uses. It shares `get`'s mutual-exclusivity rule: it cannot be combined with `--turn`, `--turn-limit`, or `--turn-offset`. An exact `--turn` that matches nothing follows the same rule `get` does: a `TURN_NOT_FOUND` warning, an empty `participants` array, and exit 2, with the full envelope still printed — see [Retrieve a thread](#retrieve-a-thread) above.
 
 `--limit` has no default, so the full participant list is returned unless a smaller page is requested. `counts.total` is the number of participants matching before `--limit`/`--offset` is applied, so truncation is detectable; `counts.participants` is how many are actually returned in this page. `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` describe every participant matching the current turn selection before paging, so they do not shrink when `--limit`/`--offset` does. With no turn selection that is the whole thread; with `--turn`, `--turn-limit`, `--turn-offset`, or `--last-turn` it is only the selected turns, so `hierarchyAvailable: false` on a bounded read does not mean the thread has no hierarchy elsewhere. `--tree` is rejected together with `--format jsonl`, because JSONL is a flat one-record-per-line contract and a nested tree cannot be expressed in it.
 
@@ -239,7 +241,9 @@ t3-session find --title "topic" --format json
 t3-session find --title "topic" --reverse
 ```
 
-`find` defaults to oldest-first chronological order, matching `list`; pass `--reverse` for newest-first. Its result shape is unchanged — a bare array of search results. `list` is the envelope-based, paginated command; use it when you need `limit`, `offset`, `hasMore`, or filtering by project and time window.
+`find` defaults to oldest-first chronological order, matching `list`; pass `--reverse` for newest-first. `find --format json` emits the `t3-session.find.v1` envelope (`schemaVersion`, `toolVersion`, `filters.title`, `ordering`, `count`, `threads`), where each entry in `threads` is the same per-thread shape `list` returns. `find` supports `--format human` and `--format json` only, and has no `--limit`/`--offset` — it always returns every title match, so there is no `hasMore` to check. Use `list` instead when you need paging or filtering by project and time window.
+
+**Breaking change:** `find --format json` returned a bare array in the published `0.1.0` release. A consumer written against that shape must switch to reading `.threads` from the envelope; see `CHANGELOG.md`.
 
 Use doctor to inspect the expected installation without retrieving conversation content:
 
@@ -261,13 +265,15 @@ t3-session schema jsonl-record.v1
 t3-session schema list.v1
 t3-session schema tail-record.v1
 t3-session schema participants.v1
+t3-session schema doctor.v1
+t3-session schema find.v1
 ```
 
 The bundled schemas are versioned and are included in the npm package.
 
 ## Claude and Codex skill installation
 
-The package includes a recovery skill at `skills/t3-session/`. Install it for Claude or Codex:
+The package includes a recovery skill at `skills/t3-session/`: `SKILL.md`, `references/cli.md`, `references/workflows.md`, and `agents/openai.yaml` (a small Codex-style agent-interface metadata stub — display name, short description, default prompt — bundled alongside the skill; it is not part of the command reference). Install it for Claude or Codex:
 
 ```bash
 t3-session install --skills claude
@@ -287,7 +293,7 @@ t3-session install --skills claude --backup
 t3-session install --skills codex --backup
 ```
 
-`--overwrite` replaces only the resolved `t3-session` skill directory. `--backup` moves the existing directory to a timestamped sibling backup before installing. The installer rejects invalid targets and does not accept a user-controlled destination path.
+`--overwrite` replaces only the resolved `t3-session` skill directory. `--backup` moves the existing directory to a timestamped sibling backup before installing. The installer rejects invalid targets and does not accept a user-controlled destination path. A failed `install` — a destination that already exists with neither `--overwrite` nor `--backup`, or an invalid/conflicting target — exits 3 with a `t3-session.error.v1` error, the same code used for other rejected-arguments cases.
 
 ## Privacy and read-only guarantees
 
@@ -297,7 +303,7 @@ The package opens SQLite read-only, allows SQLite WAL/SHM files to be used, and 
 
 The normalized output is versioned as `t3-session.thread.v1`. JSONL records are versioned as `t3-session.jsonl-record.v1`, and machine-readable errors as `t3-session.error.v1`. New fields may be added without changing existing field meanings; a breaking output change requires a new schema version. The public API and CLI commands remain stable across compatible releases. A new command gets its own schema rather than a breaking version bump on an existing one.
 
-The package is pre-1.0. `toolVersion` in every envelope tracks the package version, not a schema version. Check the installed tool version with `t3-session --version`.
+The package is pre-1.0. Where present, `toolVersion` tracks the package version, not a schema version — but it is not on every envelope: it appears on `thread.v1`, `list.v1`, `find.v1`, `participants.v1`, and the `doctor` report, and is absent from `error.v1`, `tail-record.v1`, and per-line `jsonl-record.v1` records, which carry `schemaVersion` only. Check the installed tool version with `t3-session --version`.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for release history, schema decisions, and pre-1.0 corrections.
 

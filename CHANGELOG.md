@@ -30,15 +30,41 @@ the first time in `0.2.0`.
   selected turns is now reported with its real `parentTaskId`, `path: null`, at the top level, and
   named in this warning — distinct from `UNRESOLVED_PARENT`, which now means only a parent that does
   not exist anywhere in the thread.
+- `TURN_NOT_FOUND` warning: an exact `--turn <turn-id>` that matches no turn, on either `get` or
+  `participants`, now emits a `TURN_NOT_FOUND` warning (`details.turnId`) and exits 2, while still
+  printing the complete envelope on stdout — the same emit-then-exit-non-zero pattern `doctor` uses.
+  A turn-*window* page past the end (`--turn-limit`/`--turn-offset`/`--last-turn`) is unaffected and
+  stays a silent, valid empty page: no warning, exit 0.
+- Two new bundled schemas: `doctor.v1` (the `doctor` report now has a printable schema behind its
+  `schemaVersion`) and `find.v1` (see Breaking, below). Both are `t3-session schema`-printable and
+  ship in `schemas/`.
+
+### Breaking
+
+- **`find --format json` is now an envelope, not a bare array.** It emits `t3-session.find.v1`:
+  `schemaVersion`, `toolVersion`, `filters.title`, `ordering` (`sortBy: "updatedAt"`, `direction`),
+  `count`, and `threads` — where each `threads` entry is the same per-thread shape `list` returns.
+  `find` shipped a bare array of matches in the published `0.1.0` release; a consumer parsing that
+  shape directly must migrate to reading `.threads` from the envelope. `find` still has no
+  `--limit`/`--offset`, so there is deliberately no `limit`/`offset`/`hasMore` on the envelope.
+- **`--limit`, `--turn-limit`, and participants' `--limit` now require a positive integer.** A value
+  of `0` — previously accepted and silently returned nothing — is now rejected with
+  `"<field> must be a positive integer."` and exit 3. Offsets (`--offset`, `--turn-offset`) are
+  unchanged and still accept `0`. Anyone passing `--limit 0` (or `--turn-limit 0`) to get an
+  intentionally empty result must switch to filtering the returned page instead.
 
 ### Fixed
 
 - `--since`/`--before` accept an offset-less ISO-8601 date-time — including the space-separated form
   (`2026-08-10 09:00`) — and interpret it as UTC, matching the date-only form and UTC storage,
   instead of the host's local timezone.
+- A negative value on any numeric option (`--limit -1`, `--offset -1`, `--turn-limit -1`, and so on)
+  now reports itself: `"<option> does not accept a negative value."` It previously fell through to
+  the misleading `"Missing value for <option>."`, which is now reserved for an actually-absent value.
 
-No schema version changed with this release: `thread.v1`, `list.v1`, `tail-record.v1`,
-`jsonl-record.v1`, and `participants.v1` are all unchanged from their initial definitions.
+No *existing* schema version changed with this release: `thread.v1`, `list.v1`, `tail-record.v1`,
+`jsonl-record.v1`, and `participants.v1` are all unchanged from their initial definitions. `doctor.v1`
+and `find.v1` are new schemas, not changes to existing ones.
 
 ### Pre-1.0 corrections
 

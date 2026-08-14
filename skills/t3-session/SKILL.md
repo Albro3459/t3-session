@@ -17,12 +17,13 @@ If missing, install: `npm install -g @albro3459/t3-session`. Run `t3-session --h
 
 ## Recovery workflow
 
-1. No exact thread ID? List or search instead of guessing: `t3-session list --limit 20 --format json` or `t3-session find --title "..." --format json`. Narrow with `--project`, `--since`, `--before`, `--limit`, `--offset`, `--reverse`. Pick one candidate; do not open every result.
+1. No exact thread ID? List or search instead of guessing. Decision rule: filtering/paginating by project or a time window is `list --format json` (`--project`, `--since`, `--before`, `--limit`, `--offset`, `--reverse`); a substring match against thread titles is `find --title "..." --format json`. `find` never searches message content and has no `--limit`/`--offset` — it always returns every title match. Pick one candidate; do not open every result.
 2. Confirm the candidate before full retrieval: `t3-session get <thread-id> --last-turn --format json`. Only run a full `get` once confirmed.
 3. Any output carrying a `selection` object (from `--last-turn`, `--turn`, `--turn-limit`, or `--turn-offset`) is partial history — say so explicitly, never imply it is the whole conversation.
 4. Use `--format json` for the complete `thread.v1` object, `--format jsonl` for one normalized record per line. JSONL records after the header are already chronological — do not re-sort.
 5. Use `--raw-jsonl` only when projection data is insufficient. Preserve and report warnings and diagnostics rather than hiding them.
 6. Run `t3-session doctor --format json` when the database or expected schema is unavailable. Never do broad storage discovery; never print sensitive transcript content beyond what the task requires.
+7. An exact `--turn <turn-id>` that matches nothing is not the same as a turn-window page past the end. The former emits a `TURN_NOT_FOUND` warning (`get` or `participants`) and exits 2 while still printing the full envelope — check `warnings`, don't just retry. The latter (`--turn-limit`/`--turn-offset`/`--last-turn` landing past the end) is a silent, valid empty page: no warning, exit 0. See `references/cli.md` for the full table.
 
 ## Live state and following an active thread
 
@@ -47,6 +48,7 @@ Every `get` result carries `liveState`.
    - `PARENT_CYCLE` — parentage loops back on itself; affected tasks are reported as roots.
    - `PARENT_OUT_OF_PAGE` — `--tree` combined with `--limit`/`--offset` put a resolved parent outside the returned page; the child is surfaced at the top level, not dropped.
    - `PARENT_OUT_OF_SELECTION` — only under a turn selection (`--turn`, `--turn-limit`, `--turn-offset`, `--last-turn`). The child's recorded parent is a real task in the thread, but that parent's own activities fall outside the selected turns. The child keeps a populated `parentTaskId`, gets `path: null`, and is reported at the top level. This is not corrupt or incomplete data — say the parent is outside the selected turns and offer to re-run without turn selection.
+   - `TURN_NOT_FOUND` — an exact `--turn` matched no turn in the thread; `participants: []`, exit 2, full envelope still printed. Not a hierarchy warning — distinguish it from `PARENT_OUT_OF_SELECTION`, which means the turn selection is valid but a parent's activities fall outside it.
    - `hierarchyAvailable: true` can legitimately accompany a visually flat or partial tree when `PARENT_OUT_OF_PAGE` or `PARENT_OUT_OF_SELECTION` is present — check the warnings, not the shape of the tree.
 6. Bound the view (`--last-turn`, `--turn`, `--turn-limit`, `--limit`) on participant-heavy threads — real threads have had 261 distinct tasks. A `task.*` activity recorded with a null `turn_id` can never appear in a turn-bounded read; if an expected participant is missing from a bounded view, re-run without turn selection before concluding it is absent.
 7. Combine with `liveState` on an active thread: a participant in `state: "running"` on a settled thread (`liveState.complete: true`) usually means the task ended without a terminal status being projected, not that it is still executing.
@@ -70,6 +72,16 @@ t3-session list --project "CodeLaunch" --since 2026-08-10 --format json
 t3-session find --title "project topic" --format json
 ```
 
+`list --format json` shape (envelope + one truncated thread; `find --format json` returns the identical per-thread shape under `.threads`, plus `filters`/`ordering`/`count` and no `limit`/`offset`/`hasMore`):
+
+```json
+{ "schemaVersion": "t3-session.list.v1", "toolVersion": "0.2.0",
+  "filters": { "project": null, "since": null, "before": null },
+  "ordering": { "sortBy": "updatedAt", "direction": "asc" },
+  "limit": 50, "offset": 0, "count": 7, "hasMore": false,
+  "threads": [ { "id": "THREAD_ID", "title": "...", "project": { "title": "...", "workspaceRoot": "..." }, "...": "..." } ] }
+```
+
 Read a bounded window:
 
 ```bash
@@ -80,6 +92,8 @@ t3-session get THREAD_ID --format jsonl
 t3-session get THREAD_ID --raw-jsonl
 ```
 
+A bounded `get` carries `selection`; an exact `--turn` that matches nothing adds `TURN_NOT_FOUND` to `warnings` and exits 2 with the envelope still printed — a turn-window page past the end is silent (exit 0, no warning). Full detail and examples: `references/cli.md`.
+
 Follow an active thread:
 
 ```bash
@@ -87,6 +101,13 @@ t3-session tail THREAD_ID --once --format jsonl
 t3-session tail THREAD_ID --interval 2000 --format jsonl
 t3-session tail THREAD_ID --max-cycles 5 --turn-limit 2 --format jsonl
 t3-session tail THREAD_ID --timeout 30000 --format jsonl
+```
+
+Each `tail` line is one `t3-session.tail-record.v1` record, `op` one of `"upsert"`/`"live-state"`/`"end"`:
+
+```jsonl
+{"schemaVersion":"t3-session.tail-record.v1","op":"upsert","recordType":"turn","threadId":"THREAD_ID","cycle":1,"data":{"...":"..."}}
+{"schemaVersion":"t3-session.tail-record.v1","op":"end","recordType":"end","threadId":"THREAD_ID","cycle":1,"data":{"reason":"once","cycles":1}}
 ```
 
 Inspect participants:
@@ -98,6 +119,17 @@ t3-session participants THREAD_ID --turn TURN_ID --format jsonl
 t3-session participants THREAD_ID --limit 20 --offset 20 --reverse --format json
 ```
 
+`participants --format json` shape:
+
+```json
+{ "schemaVersion": "t3-session.participants.v1", "toolVersion": "0.2.0", "threadId": "THREAD_ID",
+  "ordering": { "sortBy": "firstSeenAt", "direction": "asc" }, "selection": null,
+  "counts": { "total": 3, "participants": 3, "roots": 3, "withExplicitParent": 0, "unresolvedParents": 0 },
+  "hierarchyAvailable": false,
+  "participants": [ { "taskId": "task-alpha", "parentTaskId": null, "path": "main.subagent1", "depth": 0, "state": "finished", "...": "..." } ],
+  "warnings": [] }
+```
+
 Diagnose and install:
 
 ```bash
@@ -105,6 +137,12 @@ t3-session doctor --format json
 t3-session schema thread.v1
 t3-session install --skills claude
 t3-session install --skills codex --backup
+```
+
+Every command's failure path uses `t3-session.error.v1` on stderr (`schemaVersion`, `code`, `message`, `details` — no `toolVersion`):
+
+```json
+{ "schemaVersion": "t3-session.error.v1", "code": "INVALID_ARGUMENTS", "message": "limit must be a positive integer.", "details": { "field": "limit", "value": "0" } }
 ```
 
 ## References
