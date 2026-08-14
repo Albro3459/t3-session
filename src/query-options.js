@@ -16,11 +16,22 @@ export function normalizeTimestamp(value, field) {
     return null;
   }
 
-  if (typeof value !== "string" || !ISO_TIMESTAMP.test(value.trim())) {
+  const trimmed = typeof value === "string" ? value.trim() : value;
+  const match = typeof trimmed === "string" ? ISO_TIMESTAMP.exec(trimmed) : null;
+  if (!match) {
     throw new InvalidArgumentsError(`${field} must be an ISO-8601 timestamp.`, { field, value });
   }
 
-  const parsed = new Date(value.trim());
+  // A date-time with no UTC offset is ambiguous under `new Date(...)`, which parses that
+  // form in the host's local timezone while stored values are UTC. Treat it as UTC instead,
+  // matching date-only input (which `Date` already parses as UTC) and matching storage.
+  const hasTimeComponent = match[1] !== undefined;
+  const hasOffset = match[4] !== undefined;
+  const forParsing = hasTimeComponent && !hasOffset
+    ? `${trimmed.replace(" ", "T")}Z`
+    : trimmed;
+
+  const parsed = new Date(forParsing);
   if (Number.isNaN(parsed.getTime())) {
     throw new InvalidArgumentsError(`${field} must be an ISO-8601 timestamp.`, { field, value });
   }

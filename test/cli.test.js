@@ -8,6 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { main, parseCliArgs } from "../src/cli.js";
+import { normalizeTimestamp } from "../src/query-options.js";
 import { deleteThread } from "./fixtures/live-fixture.js";
 import {
   BROKEN_THREAD_ID as PARTICIPANT_BROKEN_THREAD_ID,
@@ -730,6 +731,75 @@ test("list filters by since (inclusive) and before (exclusive)", () => {
   }
 });
 
+test("normalizeTimestamp interprets an offset-less date-time as UTC regardless of host timezone", () => {
+  const originalTz = process.env.TZ;
+  // A host west of UTC would shift an offset-less date-time backwards under the old
+  // local-time parsing, so this only fails without the fix.
+  process.env.TZ = "America/New_York";
+  try {
+    assert.equal(
+      normalizeTimestamp("2026-08-10T09:00:00", "since"),
+      "2026-08-10T09:00:00.000Z",
+    );
+    assert.equal(
+      normalizeTimestamp("2026-08-10T09:00:00", "since"),
+      normalizeTimestamp("2026-08-10T09:00:00Z", "since"),
+    );
+    // The space-separated variant the regex accepts gets the same UTC treatment.
+    assert.equal(
+      normalizeTimestamp("2026-08-10 09:00:00", "since"),
+      "2026-08-10T09:00:00.000Z",
+    );
+  } finally {
+    if (originalTz === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = originalTz;
+    }
+  }
+});
+
+test("normalizeTimestamp still honors explicit offsets and date-only input", () => {
+  assert.equal(
+    normalizeTimestamp("2026-08-10T09:00:00-05:00", "since"),
+    "2026-08-10T14:00:00.000Z",
+  );
+  assert.equal(normalizeTimestamp("2026-08-10", "since"), "2026-08-10T00:00:00.000Z");
+});
+
+test("list --since with an offset-less date-time agrees with the Z form across host timezones", () => {
+  const fixture = createFixtureDatabase();
+  const originalTz = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    const offsetlessResult = runCli(fixture, [
+      "list", "--since", "2026-02-01T00:00:00", "--format", "json", "--db", fixture.databasePath,
+    ]);
+    assert.equal(offsetlessResult.status, 0);
+    assert.equal(offsetlessResult.stderr, "");
+    const offsetlessList = JSON.parse(offsetlessResult.stdout);
+    assert.deepEqual(offsetlessList.threads.map((thread) => thread.id), [
+      WINDOW_THREAD_ID,
+      TIE_THREAD_A_ID,
+      TIE_THREAD_B_ID,
+    ]);
+
+    const zResult = runCli(fixture, [
+      "list", "--since", "2026-02-01T00:00:00Z", "--format", "json", "--db", fixture.databasePath,
+    ]);
+    assert.equal(zResult.status, 0);
+    const zList = JSON.parse(zResult.stdout);
+    assert.deepEqual(offsetlessList.threads.map((thread) => thread.id), zList.threads.map((thread) => thread.id));
+  } finally {
+    if (originalTz === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = originalTz;
+    }
+    cleanupFixture(fixture);
+  }
+});
+
 test("list rejects invalid values before opening SQLite", () => {
   const fixture = createFixtureDatabase();
   try {
@@ -848,6 +918,25 @@ test("get --turn-limit with --turn-offset selects the correct window", () => {
     assert.equal(result.status, 0);
     assert.equal(result.stderr, "");
     const thread = JSON.parse(result.stdout);
+    assert.deepEqual(thread.selection.selectedTurnIds, ["wturn-2"]);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("get --turn-offset alone defaults --turn-limit to 1", () => {
+  const fixture = createFixtureDatabase();
+  try {
+    const result = runCli(fixture, [
+      "get", WINDOW_THREAD_ID, "--turn-offset", "1", "--format", "json", "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const thread = JSON.parse(result.stdout);
+    assert.equal(thread.selection.kind, "turn-window");
+    assert.equal(thread.selection.turnLimit, 1);
+    assert.equal(thread.selection.turnOffset, 1);
     assert.deepEqual(thread.selection.selectedTurnIds, ["wturn-2"]);
   } finally {
     cleanupFixture(fixture);
