@@ -49,6 +49,14 @@ const TURN_SCOPED_TURN_2 = "tsturn-2";
 const TURN_SCOPED_GHOST_THREAD_ID = "participant-turn-scoped-ghost-thread";
 const TURN_SCOPED_GHOST_TURN = "tsgturn-1";
 
+// A standalone database, scoped to coverage gaps 4 and 5: isBackgrounded folded across
+// multiple activities for one task (not just a single-activity type check), and turnId keeping
+// the first non-null turn_id across activities rather than the last.
+const FOLD_THREAD_ID = "participant-fold-across-activities-thread";
+const FOLD_COMMON_TURN = "cafturn-1";
+const FOLD_TURN_A = "cafturn-a";
+const FOLD_TURN_B = "cafturn-b";
+
 function createTurnScopedFixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "t3-session-turn-scoped-"));
   const databasePath = path.join(directory, "state.sqlite");
@@ -172,6 +180,158 @@ function createTurnScopedFixture() {
   activity.run("tsg-1", TURN_SCOPED_GHOST_THREAD_ID, TURN_SCOPED_GHOST_TURN, "task.started",
     JSON.stringify({ taskId: "turn-scoped-c", title: "Orphan under selection", parentAgentId: "turn-scoped-ghost" }),
     "2026-04-02T00:00:20.000Z", 1);
+
+  database.close();
+  return { directory, databasePath };
+}
+
+function createFoldAcrossActivitiesFixture() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "t3-session-fold-across-"));
+  const databasePath = path.join(directory, "state.sqlite");
+  const database = new DatabaseSync(databasePath);
+
+  database.exec(`
+    CREATE TABLE projection_projects (
+      project_id TEXT PRIMARY KEY,
+      title TEXT,
+      workspace_root TEXT
+    );
+    CREATE TABLE projection_threads (
+      thread_id TEXT PRIMARY KEY,
+      project_id TEXT,
+      title TEXT,
+      branch TEXT,
+      worktree_path TEXT,
+      latest_turn_id TEXT,
+      created_at TEXT,
+      updated_at TEXT,
+      latest_user_message_at TEXT,
+      deleted_at TEXT,
+      runtime_mode TEXT,
+      interaction_mode TEXT,
+      model_selection_json TEXT
+    );
+    CREATE TABLE projection_thread_messages (
+      message_id TEXT PRIMARY KEY,
+      thread_id TEXT,
+      turn_id TEXT,
+      role TEXT,
+      text TEXT,
+      is_streaming INTEGER,
+      created_at TEXT,
+      updated_at TEXT,
+      attachments_json TEXT
+    );
+    CREATE TABLE projection_thread_activities (
+      activity_id TEXT PRIMARY KEY,
+      thread_id TEXT,
+      turn_id TEXT,
+      tone TEXT,
+      kind TEXT,
+      summary TEXT,
+      payload_json TEXT,
+      created_at TEXT,
+      sequence INTEGER
+    );
+    CREATE TABLE projection_thread_sessions (
+      thread_id TEXT PRIMARY KEY,
+      provider_name TEXT,
+      provider_session_id TEXT,
+      provider_thread_id TEXT,
+      provider_instance_id TEXT,
+      status TEXT,
+      last_error TEXT
+    );
+    CREATE TABLE projection_turns (
+      row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id TEXT,
+      turn_id TEXT,
+      pending_message_id TEXT,
+      source_proposed_plan_thread_id TEXT,
+      source_proposed_plan_id TEXT,
+      assistant_message_id TEXT,
+      state TEXT,
+      requested_at TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      checkpoint_turn_count INTEGER,
+      checkpoint_ref TEXT,
+      checkpoint_status TEXT,
+      checkpoint_files_json TEXT
+    );
+  `);
+
+  const thread = database.prepare(`
+    INSERT INTO projection_threads (
+      thread_id, project_id, title, branch, worktree_path, latest_turn_id,
+      created_at, updated_at, latest_user_message_at, deleted_at, runtime_mode,
+      interaction_mode, model_selection_json
+    ) VALUES (?, NULL, ?, NULL, NULL, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)
+  `);
+  thread.run(FOLD_THREAD_ID, "Fold across activities", FOLD_TURN_B,
+    "2026-05-01T00:00:00.000Z", "2026-05-01T00:20:00.000Z");
+
+  const turn = database.prepare(`
+    INSERT INTO projection_turns (
+      thread_id, turn_id, pending_message_id, source_proposed_plan_thread_id,
+      source_proposed_plan_id, assistant_message_id, state, requested_at, started_at,
+      completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status,
+      checkpoint_files_json
+    ) VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+  `);
+  turn.run(FOLD_THREAD_ID, FOLD_COMMON_TURN, "completed",
+    "2026-05-01T00:00:10.000Z", "2026-05-01T00:00:11.000Z", "2026-05-01T00:00:59.000Z");
+  turn.run(FOLD_THREAD_ID, FOLD_TURN_A, "completed",
+    "2026-05-01T00:05:10.000Z", "2026-05-01T00:05:11.000Z", "2026-05-01T00:05:59.000Z");
+  turn.run(FOLD_THREAD_ID, FOLD_TURN_B, "completed",
+    "2026-05-01T00:10:10.000Z", "2026-05-01T00:10:11.000Z", "2026-05-01T00:10:59.000Z");
+
+  const activity = database.prepare(`
+    INSERT INTO projection_thread_activities (
+      activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
+    ) VALUES (?, ?, ?, 'info', ?, NULL, ?, ?, ?)
+  `);
+
+  // isBackgrounded folded across activities, not just type-checked within one: true then a
+  // later false must fold to false -- the later non-null value wins, and false is not treated
+  // as absent.
+  activity.run("caf-1", FOLD_THREAD_ID, FOLD_COMMON_TURN, "task.started", JSON.stringify({
+    taskId: "fold-bool-true-then-false", isBackgrounded: true,
+  }), "2026-05-01T00:00:20.000Z", 1);
+  activity.run("caf-2", FOLD_THREAD_ID, FOLD_COMMON_TURN, "task.progress", JSON.stringify({
+    taskId: "fold-bool-true-then-false", isBackgrounded: false,
+  }), "2026-05-01T00:00:21.000Z", 2);
+
+  // false must survive a later activity that omits the field entirely: last-non-null-wins
+  // means "no value reported in this activity", not "revert to null".
+  activity.run("caf-3", FOLD_THREAD_ID, FOLD_COMMON_TURN, "task.started", JSON.stringify({
+    taskId: "fold-bool-false-then-omitted", isBackgrounded: false,
+  }), "2026-05-01T00:00:22.000Z", 3);
+  activity.run("caf-4", FOLD_THREAD_ID, FOLD_COMMON_TURN, "task.progress", JSON.stringify({
+    taskId: "fold-bool-false-then-omitted", lastToolName: "Grep",
+  }), "2026-05-01T00:00:23.000Z", 4);
+
+  // A wrong-typed value reported after a real boolean must not overwrite it.
+  activity.run("caf-5", FOLD_THREAD_ID, FOLD_COMMON_TURN, "task.started", JSON.stringify({
+    taskId: "fold-bool-true-then-wrong-typed", isBackgrounded: true,
+  }), "2026-05-01T00:00:24.000Z", 5);
+  activity.run("caf-6", FOLD_THREAD_ID, FOLD_COMMON_TURN, "task.progress", JSON.stringify({
+    taskId: "fold-bool-true-then-wrong-typed", isBackgrounded: "yes",
+  }), "2026-05-01T00:00:25.000Z", 6);
+
+  // turnId keeps the first non-null turn_id: an early activity names no turn, and two later
+  // activities in different, distinct turns follow. First-non-null-wins must resolve to
+  // FOLD_TURN_A, not FOLD_TURN_B (last-non-null-wins) and not null (literal turn of the
+  // earliest contributing activity).
+  activity.run("caf-7", FOLD_THREAD_ID, null, "task.started", JSON.stringify({
+    taskId: "fold-turn-null-then-two-real", title: "untagged start",
+  }), "2026-05-01T00:00:26.000Z", 7);
+  activity.run("caf-8", FOLD_THREAD_ID, FOLD_TURN_A, "task.progress", JSON.stringify({
+    taskId: "fold-turn-null-then-two-real", detail: "first tagged turn",
+  }), "2026-05-01T00:05:20.000Z", 8);
+  activity.run("caf-9", FOLD_THREAD_ID, FOLD_TURN_B, "task.completed", JSON.stringify({
+    taskId: "fold-turn-null-then-two-real", status: "completed",
+  }), "2026-05-01T00:10:20.000Z", 9);
 
   database.close();
   return { directory, databasePath };
@@ -402,6 +562,26 @@ test("firstSeenAt, lastSeenAt, activityCount, turnId, and turnIds are computed f
     assert.equal(alpha.activityCount, 3);
     assert.equal(alpha.turnId, "pturn-1");
     assert.deepEqual(alpha.turnIds, ["pturn-1"]);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// Discriminates the documented decision (src/participants.js:183): turnId keeps the first
+// non-null turn_id, not the literal turn of the earliest contributing activity (which would be
+// null here) and not the last non-null turn_id (which a last-non-null-wins fold would report).
+test("turnId keeps the first non-null turn_id across activities, not null and not the last", async () => {
+  const fixture = createFoldAcrossActivitiesFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(FOLD_THREAD_ID);
+    const task = byTaskId(view, "fold-turn-null-then-two-real");
+
+    // Activity order: turn_id null, then FOLD_TURN_A, then FOLD_TURN_B.
+    assert.equal(task.turnId, FOLD_TURN_A);
+    assert.notEqual(task.turnId, FOLD_TURN_B);
+    assert.deepEqual(task.turnIds, [FOLD_TURN_A, FOLD_TURN_B]);
+    assertValidEnvelope(view);
   } finally {
     cleanupFixture(fixture);
   }
@@ -894,6 +1074,58 @@ test("a legitimate isBackgrounded: false is preserved as a real boolean, not swa
     const boolFalse = byTaskId(view, "bool-false-task");
 
     assert.equal(boolFalse.isBackgrounded, false);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// The single-activity test above only specifies the type handling; these three exercise
+// isBackgrounded folding ACROSS activities for one task, which the type check alone does not.
+test("isBackgrounded true then a later false folds to false across activities, the later non-null value is not swallowed", async () => {
+  const fixture = createFoldAcrossActivitiesFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(FOLD_THREAD_ID);
+    const task = byTaskId(view, "fold-bool-true-then-false");
+
+    assert.equal(task.isBackgrounded, false);
+    assertValidEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("isBackgrounded false survives a later activity that omits the field, rather than reverting to null", async () => {
+  const fixture = createFoldAcrossActivitiesFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(FOLD_THREAD_ID);
+    const task = byTaskId(view, "fold-bool-false-then-omitted");
+
+    assert.equal(task.isBackgrounded, false);
+    assertValidEnvelope(view);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+// The real behavior is stricter than "falls back to adapterSpecific": because isBackgrounded
+// already resolved to a real boolean from the earlier activity, the field is recorded in
+// usableScalars, so the later wrong-typed raw value is dropped entirely rather than being kept
+// anywhere -- adapterSpecific only receives a field's raw value when that field never resolves
+// to a usable value in ANY activity for the task (src/participants.js:245-252). A prior guess
+// that the wrong-typed value would land in adapterSpecific here does not hold; this pins the
+// actual behavior instead.
+test("a wrong-typed isBackgrounded reported after a real boolean does not overwrite it, and is dropped rather than surfacing in adapterSpecific", async () => {
+  const fixture = createFoldAcrossActivitiesFixture();
+  try {
+    const client = await createT3SessionClient({ db: fixture.databasePath });
+    const view = await client.listParticipants(FOLD_THREAD_ID);
+    const task = byTaskId(view, "fold-bool-true-then-wrong-typed");
+
+    assert.equal(task.isBackgrounded, true);
+    assert.equal(task.adapterSpecific, undefined);
+    assertValidEnvelope(view);
   } finally {
     cleanupFixture(fixture);
   }
