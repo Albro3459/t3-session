@@ -410,6 +410,77 @@ function queryAll(database, sql, parameters, operation) {
   }
 }
 
+// Runs `run` against an already-open database inside a read-only deferred transaction: BEGIN
+// DEFERRED, validate the required schema, then the caller's read, with ROLLBACK and close
+// guaranteed afterward. A BEGIN or ROLLBACK failure classifies as DatabaseUnavailableError the
+// same way queryAll classifies a failed SELECT. If the read body already threw (a classified
+// error or otherwise), a later ROLLBACK or close failure is swallowed rather than replacing it —
+// the error already in flight always wins.
+export function runReadTransaction(database, operation, run) {
+  let transactionStarted = false;
+  let inFlightError = null;
+  let finallyError = null;
+
+  try {
+    try {
+      database.exec("BEGIN DEFERRED");
+      transactionStarted = true;
+    } catch (error) {
+      throw new DatabaseUnavailableError(
+        `Unable to start a read transaction for ${operation}.`,
+        { operation },
+        error,
+      );
+    }
+
+    validateRequiredTables(database);
+    return run(database);
+  } catch (error) {
+    inFlightError = error;
+    throw error;
+  } finally {
+    if (transactionStarted) {
+      try {
+        database.exec("ROLLBACK");
+      } catch (error) {
+        if (inFlightError === null) {
+          finallyError = new DatabaseUnavailableError(
+            `Unable to roll back the read transaction for ${operation}.`,
+            { operation },
+            error,
+          );
+        }
+      }
+    }
+
+    try {
+      database.close();
+    } catch (error) {
+      if (inFlightError === null && finallyError === null) {
+        finallyError = new DatabaseUnavailableError(
+          `Unable to close the SQLite database after ${operation}.`,
+          { operation },
+          error,
+        );
+      }
+    }
+
+    if (finallyError !== null) {
+      throw finallyError;
+    }
+  }
+}
+
+// Opens a fresh read-only connection and delegates the transaction lifecycle to
+// runReadTransaction. All five read paths in this module (readThreadFromDatabase,
+// findThreadsFromDatabase, listThreadRowsFromDatabase, readThreadWindowFromDatabase,
+// readParticipantActivitiesFromDatabase) route through this so none of them can bypass
+// classification of a BEGIN/ROLLBACK/close failure.
+function readWithTransaction(databasePath, operation, run) {
+  const database = openReadonlyDatabase(databasePath);
+  return runReadTransaction(database, operation, run);
+}
+
 function escapeLikeLiteral(value) {
   return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
 }
@@ -576,19 +647,11 @@ export function retrieveParticipantActivityRows(database, threadId, selection = 
 }
 
 export function readParticipantActivitiesFromDatabase(databasePath, threadId, selection = null) {
-  const database = openReadonlyDatabase(databasePath);
-  let transactionStarted = false;
-  try {
-    database.exec("BEGIN DEFERRED");
-    transactionStarted = true;
-    validateRequiredTables(database);
-    return retrieveParticipantActivityRows(database, threadId, selection);
-  } finally {
-    if (transactionStarted) {
-      database.exec("ROLLBACK");
-    }
-    database.close();
-  }
+  return readWithTransaction(
+    databasePath,
+    "participant activities",
+    (database) => retrieveParticipantActivityRows(database, threadId, selection),
+  );
 }
 
 export function retrieveThreadWindowRows(database, threadId, selection) {
@@ -696,53 +759,29 @@ export function countProjectionRows(database) {
 }
 
 export function readThreadFromDatabase(databasePath, threadId) {
-  const database = openReadonlyDatabase(databasePath);
-  let transactionStarted = false;
-  try {
-    database.exec("BEGIN DEFERRED");
-    transactionStarted = true;
-    validateRequiredTables(database);
-    return retrieveThreadRows(database, threadId);
-  } finally {
-    if (transactionStarted) {
-      database.exec("ROLLBACK");
-    }
-    database.close();
-  }
+  return readWithTransaction(
+    databasePath,
+    "thread",
+    (database) => retrieveThreadRows(database, threadId),
+  );
 }
 
 export function findThreadsFromDatabase(databasePath, title, { reverse = false } = {}) {
   const titleFilter = normalizeTitleFilter(title);
-  const database = openReadonlyDatabase(databasePath);
-  let transactionStarted = false;
-  try {
-    database.exec("BEGIN DEFERRED");
-    transactionStarted = true;
-    validateRequiredTables(database);
-    return retrieveThreadSearchRows(database, titleFilter, { reverse });
-  } finally {
-    if (transactionStarted) {
-      database.exec("ROLLBACK");
-    }
-    database.close();
-  }
+  return readWithTransaction(
+    databasePath,
+    "thread search",
+    (database) => retrieveThreadSearchRows(database, titleFilter, { reverse }),
+  );
 }
 
 export function listThreadRowsFromDatabase(databasePath, options) {
   const listOptions = normalizeListOptions(options);
-  const database = openReadonlyDatabase(databasePath);
-  let transactionStarted = false;
-  try {
-    database.exec("BEGIN DEFERRED");
-    transactionStarted = true;
-    validateRequiredTables(database);
-    return retrieveThreadListRows(database, listOptions);
-  } finally {
-    if (transactionStarted) {
-      database.exec("ROLLBACK");
-    }
-    database.close();
-  }
+  return readWithTransaction(
+    databasePath,
+    "thread list",
+    (database) => retrieveThreadListRows(database, listOptions),
+  );
 }
 
 // One tail cycle: the same row shape the full and windowed reads return, so a tail and a
@@ -759,17 +798,9 @@ export function readThreadWindowFromDatabase(databasePath, threadId, selection) 
     throw new InvalidArgumentsError("A turn selection is required.", { field: "selection" });
   }
 
-  const database = openReadonlyDatabase(databasePath);
-  let transactionStarted = false;
-  try {
-    database.exec("BEGIN DEFERRED");
-    transactionStarted = true;
-    validateRequiredTables(database);
-    return retrieveThreadWindowRows(database, threadId, selection);
-  } finally {
-    if (transactionStarted) {
-      database.exec("ROLLBACK");
-    }
-    database.close();
-  }
+  return readWithTransaction(
+    databasePath,
+    "thread window",
+    (database) => retrieveThreadWindowRows(database, threadId, selection),
+  );
 }

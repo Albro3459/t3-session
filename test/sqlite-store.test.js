@@ -7,14 +7,21 @@ import test from "node:test";
 import {
   createT3SessionClient,
   DatabaseUnavailableError,
+  EXIT_CODES,
   InvalidArgumentsError,
   listThreadRowsFromDatabase,
   readParticipantActivitiesFromDatabase,
+  readThreadFromDatabase,
   readThreadWindowFromDatabase,
   SchemaUnavailableError,
   ThreadNotFoundError,
   VERSION,
 } from "../src/index.js";
+import {
+  REQUIRED_COLUMNS,
+  REQUIRED_TABLES,
+  runReadTransaction,
+} from "../src/sqlite-store.js";
 import {
   FLAT_THREAD_ID as PARTICIPANT_FLAT_THREAD_ID,
   createParticipantFixture,
@@ -865,4 +872,155 @@ test("a participant whose activities all have a null turn_id is excluded from ev
   } finally {
     cleanupFixture(fixture);
   }
+});
+
+// Coverage gap 1: no prior test provoked real SQLite lock contention against a read path;
+// every existing transient-failure test injects a DatabaseUnavailableError or deletes the
+// database file instead. This one holds a genuine EXCLUSIVE lock from a second writable
+// connection against the fixture's default rollback-journal (non-WAL) database and lets a
+// real read path run into it with the module's real (fixed) busy_timeout.
+//
+// Note on what this does and does not prove: BEGIN DEFERRED takes no lock in SQLite (verified
+// empirically against this runtime's node:sqlite - see the investigation note below), and a
+// read-only transaction's ROLLBACK only releases a lock rather than acquiring one, so neither
+// statement itself ever raises SQLITE_BUSY. Under contention the busy error surfaces at the
+// first actual SELECT inside the transaction (schema inspection or the row query), which
+// queryAll/listTables/listColumns already wrapped as DatabaseUnavailableError before this
+// change. This test therefore closes the "real contention is never exercised" coverage gap
+// and pins the end-to-end exit-4 contract, but it does not by itself discriminate the
+// BEGIN/ROLLBACK guard added for issue 4 - the two tests below do that with a stub database
+// whose exec() fails exactly at BEGIN or exactly at ROLLBACK.
+test("real SQLite lock contention on a read path raises DatabaseUnavailableError with exit code 4", () => {
+  const fixture = createFixtureDatabase();
+  // createFixtureDatabase never sets journal_mode=WAL, so this is the default rollback-journal
+  // mode where BEGIN EXCLUSIVE takes the lock immediately.
+  const writer = new DatabaseSync(fixture.databasePath);
+  writer.exec("BEGIN EXCLUSIVE");
+  try {
+    assert.throws(
+      () => readThreadFromDatabase(fixture.databasePath, ACTIVE_THREAD_ID),
+      (error) => error instanceof DatabaseUnavailableError
+        && error.code === "DATABASE_UNAVAILABLE"
+        && error.exitCode === EXIT_CODES.DATABASE_UNAVAILABLE,
+    );
+  } finally {
+    writer.exec("ROLLBACK");
+    writer.close();
+    cleanupFixture(fixture);
+  }
+});
+
+// A database stand-in whose exec()/close() behave normally except where the test overrides
+// them, and whose prepare() answers the schema-inspection queries validateRequiredTables
+// issues (listTables' sqlite_schema query and listColumns' PRAGMA table_info per table) so a
+// stub run reaches the caller's read body exactly like a real database would.
+function createSchemaValidDatabaseStub({ execImpl = () => {}, closeImpl = () => {} } = {}) {
+  return {
+    exec(sql) {
+      execImpl(sql);
+    },
+    prepare(sql) {
+      if (sql.includes("sqlite_schema")) {
+        return { all: () => REQUIRED_TABLES.map((name) => ({ name })) };
+      }
+      const match = sql.match(/PRAGMA table_info\((\w+)\)/);
+      if (match) {
+        return { all: () => REQUIRED_COLUMNS[match[1]].map((name) => ({ name })) };
+      }
+      throw new Error(`createSchemaValidDatabaseStub: unexpected prepare(${sql})`);
+    },
+    close() {
+      closeImpl();
+    },
+  };
+}
+
+test("runReadTransaction classifies a BEGIN failure as DatabaseUnavailableError", () => {
+  const database = createSchemaValidDatabaseStub({
+    execImpl(sql) {
+      if (sql === "BEGIN DEFERRED") {
+        throw new Error("simulated BEGIN failure");
+      }
+    },
+  });
+
+  assert.throws(
+    () => runReadTransaction(database, "test read", () => "unused"),
+    (error) => error instanceof DatabaseUnavailableError
+      && error.code === "DATABASE_UNAVAILABLE"
+      && error.exitCode === EXIT_CODES.DATABASE_UNAVAILABLE
+      && error.details.operation === "test read",
+  );
+});
+
+test("runReadTransaction classifies a ROLLBACK failure as DatabaseUnavailableError when the read succeeded", () => {
+  const database = createSchemaValidDatabaseStub({
+    execImpl(sql) {
+      if (sql === "ROLLBACK") {
+        throw new Error("simulated ROLLBACK failure");
+      }
+    },
+  });
+
+  assert.throws(
+    () => runReadTransaction(database, "test read", () => "ok"),
+    (error) => error instanceof DatabaseUnavailableError
+      && error.code === "DATABASE_UNAVAILABLE"
+      && error.exitCode === EXIT_CODES.DATABASE_UNAVAILABLE,
+  );
+});
+
+// The plausible half of issue 4: a ROLLBACK failure must not replace an error already in
+// flight from the read body. The stub's exec() only fails on ROLLBACK; the read body throws a
+// real, already-classified ThreadNotFoundError first, and that error - not the rollback
+// failure - must be what the caller sees.
+test("a ROLLBACK failure never replaces a classified error already in flight from the read body", () => {
+  const database = createSchemaValidDatabaseStub({
+    execImpl(sql) {
+      if (sql === "ROLLBACK") {
+        throw new Error("simulated ROLLBACK failure");
+      }
+    },
+  });
+
+  assert.throws(
+    () => runReadTransaction(database, "test read", () => {
+      throw new ThreadNotFoundError("thread-in-flight-0001");
+    }),
+    (error) => error instanceof ThreadNotFoundError
+      && error.code === "THREAD_NOT_FOUND"
+      && error.exitCode === EXIT_CODES.THREAD_NOT_FOUND
+      && error.details.threadId === "thread-in-flight-0001",
+  );
+});
+
+test("runReadTransaction classifies a close() failure as DatabaseUnavailableError when nothing else failed", () => {
+  const database = createSchemaValidDatabaseStub({
+    closeImpl() {
+      throw new Error("simulated close failure");
+    },
+  });
+
+  assert.throws(
+    () => runReadTransaction(database, "test read", () => "ok"),
+    (error) => error instanceof DatabaseUnavailableError
+      && error.code === "DATABASE_UNAVAILABLE"
+      && error.exitCode === EXIT_CODES.DATABASE_UNAVAILABLE,
+  );
+});
+
+test("a close() failure never replaces a classified error already in flight from the read body", () => {
+  const database = createSchemaValidDatabaseStub({
+    closeImpl() {
+      throw new Error("simulated close failure");
+    },
+  });
+
+  assert.throws(
+    () => runReadTransaction(database, "test read", () => {
+      throw new ThreadNotFoundError("thread-in-flight-0002");
+    }),
+    (error) => error instanceof ThreadNotFoundError
+      && error.details.threadId === "thread-in-flight-0002",
+  );
 });
