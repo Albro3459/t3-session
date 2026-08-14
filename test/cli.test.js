@@ -1590,6 +1590,77 @@ test("participants human output states plainly that the list is flat", () => {
   }
 });
 
+test("participants human output enriches a participant with kind/type/effort, summary, usage, and output", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    assert.match(
+      result.stdout,
+      new RegExp(
+        [
+          "- Alpha task\\n",
+          "\\s+Task ID: task-alpha\\n",
+          "\\s+Role: general-purpose\\n",
+          "\\s+Model: model-a\\n",
+          "\\s+Kind: agent, Type: local_agent, Effort: high\\n",
+          "\\s+State: finished\\n",
+          "\\s+Status: completed\\n",
+          "\\s+Summary: Alpha done\\n",
+          "\\s+Turn: pturn-1\\n",
+          "\\s+Seen: 2026-03-01T00:00:20\\.000Z -> 2026-03-01T00:00:40\\.000Z\\n",
+          "\\s+Activities: 3 \\(tool uses: 5, tokens: 1500, duration: 6\\.0s\\)\\n",
+          "\\s+Last tool: Read\\n",
+          "\\s+Output: /tmp/alpha\\.out\\n",
+        ].join(""),
+      ),
+    );
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test("participants human output omits a field group entirely when every value in it is null", () => {
+  const fixture = createParticipantFixture();
+  try {
+    const result = runCli(fixture, [
+      "participants", PARTICIPANT_FLAT_THREAD_ID, "--db", fixture.databasePath,
+    ]);
+
+    assert.equal(result.status, 0);
+    const stdout = result.stdout;
+    const betaStart = stdout.indexOf("- Beta task");
+    const gammaStart = stdout.indexOf("- Gamma task");
+    assert.ok(betaStart >= 0 && gammaStart > betaStart);
+    const betaBlock = stdout.slice(betaStart, gammaStart);
+    const gammaBlock = stdout.slice(gammaStart);
+
+    // Beta has agentKind/taskType but no effort: the group line prints, but only the present
+    // sub-fields, not a null Effort.
+    assert.match(betaBlock, /Kind: agent, Type: local_agent\n/);
+    assert.doesNotMatch(betaBlock, /Effort/);
+    // Beta never reports usage at all, so the Activities line carries no parenthetical.
+    assert.match(betaBlock, /Activities: 2\n/);
+    assert.doesNotMatch(betaBlock, /tool uses:/);
+    assert.doesNotMatch(betaBlock, /Summary:/);
+
+    // Gamma reports neither agentKind, taskType, nor effort: the whole group line is omitted,
+    // not printed with three null placeholders.
+    assert.doesNotMatch(gammaBlock, /Kind:/);
+    assert.doesNotMatch(gammaBlock, /Summary:/);
+    assert.doesNotMatch(gammaBlock, /Last tool:/);
+    // Gamma is explicitly backgrounded but has no output file: the group line prints only the
+    // present sub-field.
+    assert.match(gammaBlock, /Backgrounded: yes\n/);
+    assert.doesNotMatch(gammaBlock, /Output:/);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
 test("participants --tree nests explicit children", () => {
   const fixture = createParticipantFixture();
   try {

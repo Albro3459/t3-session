@@ -18,6 +18,45 @@ function addField(lines, label, value) {
   lines.push(`${label}: ${displayValue(value)}`);
 }
 
+// Unlike addField, this omits the line entirely rather than printing a "-" placeholder for
+// null. Used for the enriched participant fields, where 261-participant threads make a stray
+// null line a real cost.
+function addCompactLine(lines, prefix, parts) {
+  const rendered = parts.filter(([, value]) => value !== null && value !== undefined && value !== "");
+  if (rendered.length === 0) {
+    return;
+  }
+  lines.push(`${prefix}${rendered.map(([label, value]) => `${label}: ${value}`).join(", ")}`);
+}
+
+// One decimal place under a minute, minutes+seconds above it -- both stay compact and neither
+// requires a locale-aware formatter.
+function formatDurationMs(durationMs) {
+  if (typeof durationMs !== "number" || !Number.isFinite(durationMs)) {
+    return null;
+  }
+  const totalSeconds = durationMs / 1000;
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return `${minutes}m ${seconds}s`;
+}
+
+// Summary/detail can run to hundreds of characters with embedded newlines in real data; only
+// the first line, truncated, is safe to fold into the indented tree layout.
+function summaryPreview(text, maxLength = 140) {
+  if (typeof text !== "string") {
+    return null;
+  }
+  const firstLine = text.split("\n")[0].trim();
+  if (firstLine.length === 0) {
+    return null;
+  }
+  return firstLine.length > maxLength ? `${firstLine.slice(0, maxLength - 1)}…` : firstLine;
+}
+
 function sectionHeading(title) {
   return [title, "-".repeat(title.length)];
 }
@@ -263,16 +302,56 @@ export function formatParticipantsJsonl(view) {
 
 function formatParticipantLines(participant, depth) {
   const indent = "  ".repeat(depth);
+  const prefix = `${indent}    `;
   const lines = [`${indent}- ${participant.title || "(untitled task)"}`];
-  addField(lines, `${indent}    Task ID`, participant.taskId);
-  addField(lines, `${indent}    Role`, participant.role);
-  addField(lines, `${indent}    Model`, participant.model);
-  lines.push(`${indent}    State: ${participant.state}`);
-  addField(lines, `${indent}    Status`, participant.status);
-  addField(lines, `${indent}    Turn`, participant.turnId);
-  lines.push(`${indent}    Activities: ${participant.activityCount}`);
+  addField(lines, `${prefix}Task ID`, participant.taskId);
+  addField(lines, `${prefix}Role`, participant.role);
+  addField(lines, `${prefix}Model`, participant.model);
+  addCompactLine(lines, prefix, [
+    ["Kind", participant.agentKind],
+    ["Type", participant.taskType],
+    ["Effort", participant.effort],
+  ]);
+  lines.push(`${prefix}State: ${participant.state}`);
+  addField(lines, `${prefix}Status`, participant.status);
+  // A projected summary is frequently the title verbatim; printing it twice is noise.
+  const summary = summaryPreview(participant.summary) ?? summaryPreview(participant.detail);
+  if (summary !== null && summary !== summaryPreview(participant.title)) {
+    lines.push(`${prefix}Summary: ${summary}`);
+  }
+  addCompactLine(lines, prefix, [["Error", participant.error]]);
+  addField(lines, `${prefix}Turn`, participant.turnId);
+  if (Array.isArray(participant.turnIds) && participant.turnIds.length > 1) {
+    lines.push(`${prefix}Turns: ${participant.turnIds.join(", ")}`);
+  }
+  addCompactLine(lines, prefix, [
+    ["Seen", participant.firstSeenAt && participant.lastSeenAt && participant.firstSeenAt !== participant.lastSeenAt
+      ? `${participant.firstSeenAt} -> ${participant.lastSeenAt}`
+      : (participant.firstSeenAt ?? participant.lastSeenAt)],
+  ]);
+  const usage = participant.usage || {};
+  const usageParts = [];
+  if (usage.toolUses !== null && usage.toolUses !== undefined) {
+    usageParts.push(`tool uses: ${usage.toolUses}`);
+  }
+  if (usage.totalTokens !== null && usage.totalTokens !== undefined) {
+    usageParts.push(`tokens: ${usage.totalTokens}`);
+  }
+  const duration = formatDurationMs(usage.durationMs);
+  if (duration !== null) {
+    usageParts.push(`duration: ${duration}`);
+  }
+  const usageSuffix = usageParts.length > 0 ? ` (${usageParts.join(", ")})` : "";
+  lines.push(`${prefix}Activities: ${participant.activityCount}${usageSuffix}`);
+  addCompactLine(lines, prefix, [["Last tool", participant.lastToolName]]);
+  addCompactLine(lines, prefix, [
+    ["Output", participant.outputFile],
+    ["Backgrounded", participant.isBackgrounded === null || participant.isBackgrounded === undefined
+      ? null
+      : (participant.isBackgrounded ? "yes" : "no")],
+  ]);
   if (participant.path) {
-    addField(lines, `${indent}    Path`, participant.path);
+    addField(lines, `${prefix}Path`, participant.path);
   }
   return lines;
 }
