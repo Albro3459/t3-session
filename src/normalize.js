@@ -1,4 +1,49 @@
+import { VERSION } from "./version.js";
+
 const SCHEMA_VERSION = "t3-session.thread.v1";
+const LIST_SCHEMA_VERSION = "t3-session.list.v1";
+const FIND_SCHEMA_VERSION = "t3-session.find.v1";
+
+// A turn state outside this set is treated as non-terminal, because reporting an
+// unfinished thread as settled is the more damaging error.
+export const TERMINAL_TURN_STATES = Object.freeze([
+  "aborted",
+  "canceled",
+  "cancelled",
+  "completed",
+  "errored",
+  "failed",
+]);
+
+export const ACTIVE_PROVIDER_STATUSES = Object.freeze([
+  "active",
+  "busy",
+  "running",
+  "streaming",
+]);
+
+export const LIVE_STATE_REASONS = Object.freeze([
+  "provider-active",
+  "streaming-message",
+  "turn-not-terminal",
+]);
+
+const TERMINAL_TURN_STATE_SET = new Set(TERMINAL_TURN_STATES);
+const ACTIVE_PROVIDER_STATUS_SET = new Set(ACTIVE_PROVIDER_STATUSES);
+
+function normalizeStateToken(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : null;
+}
+
+export function isTerminalTurnState(state) {
+  const token = normalizeStateToken(state);
+  return token !== null && TERMINAL_TURN_STATE_SET.has(token);
+}
+
+export function isActiveProviderStatus(status) {
+  const token = normalizeStateToken(status);
+  return token !== null && ACTIVE_PROVIDER_STATUS_SET.has(token);
+}
 
 function warningFor(field, raw, error) {
   return {
@@ -159,25 +204,107 @@ function normalizeProvider(row) {
   };
 }
 
-export function normalizeThreadSearchResult(row) {
-  const project = row.project_join_id === null || row.project_join_id === undefined
+function projectFromJoinRow(row) {
+  return row.project_join_id === null || row.project_join_id === undefined
     ? null
     : {
         title: row.project_title ?? null,
         workspaceRoot: row.workspace_root ?? null,
       };
+}
 
+export function normalizeThreadSearchResult(rows, { toolVersion = VERSION, title, reverse = false } = {}) {
+  const threads = rows.map(normalizeThreadSummary);
+
+  return {
+    schemaVersion: FIND_SCHEMA_VERSION,
+    toolVersion,
+    filters: {
+      title: typeof title === "string" ? title.trim() : (title ?? null),
+    },
+    ordering: {
+      sortBy: "updatedAt",
+      direction: reverse ? "desc" : "asc",
+    },
+    count: threads.length,
+    threads,
+  };
+}
+
+export function normalizeThreadSummary(row) {
   return {
     id: row.thread_id,
     projectId: row.project_id ?? null,
     title: row.title ?? null,
-    project,
+    project: projectFromJoinRow(row),
+    branch: row.branch ?? null,
+    worktreePath: row.worktree_path ?? null,
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
+    latestUserMessageAt: row.latest_user_message_at ?? null,
+    latestTurnId: row.latest_turn_id ?? null,
   };
 }
 
-export function normalizeThread(rows, { toolVersion = "0.1.0" } = {}) {
+// Live state describes the thread, not the retrieval window, so it is derived from a
+// dedicated read rather than from whichever rows a bounded window happened to select.
+// Recency of updated_at is deliberately not a signal.
+export function normalizeLiveState(rows, { observedAt } = {}) {
+  const session = rows?.session ?? null;
+  const latestTurn = rows?.latestTurn ?? null;
+  const streamingMessageCount = rows?.streamingMessageCount ?? 0;
+  const providerStatus = session?.status ?? null;
+  const reasons = [];
+
+  if (latestTurn !== null && !isTerminalTurnState(latestTurn.state)) {
+    reasons.push("turn-not-terminal");
+  }
+  if (streamingMessageCount > 0) {
+    reasons.push("streaming-message");
+  }
+  if (isActiveProviderStatus(providerStatus)) {
+    reasons.push("provider-active");
+  }
+
+  const sortedReasons = [...new Set(reasons)].sort();
+  const hasSignal = session !== null || latestTurn !== null;
+
+  return {
+    status: sortedReasons.length > 0 ? "active" : hasSignal ? "idle" : "unknown",
+    complete: sortedReasons.length === 0,
+    observedAt: observedAt ?? new Date().toISOString(),
+    providerStatus,
+    latestTurnId: latestTurn?.turn_id ?? null,
+    latestTurnState: latestTurn?.state ?? null,
+    streamingMessageCount,
+    reasons: sortedReasons,
+  };
+}
+
+export function normalizeThreadList(rows, { toolVersion = VERSION, options, hasMore = false } = {}) {
+  const threads = rows.map(normalizeThreadSummary);
+
+  return {
+    schemaVersion: LIST_SCHEMA_VERSION,
+    toolVersion,
+    filters: {
+      project: options.project ?? null,
+      since: options.since ?? null,
+      before: options.before ?? null,
+    },
+    ordering: {
+      sortBy: "updatedAt",
+      direction: options.reverse ? "desc" : "asc",
+    },
+    limit: options.limit,
+    offset: options.offset,
+    count: threads.length,
+    hasMore,
+    threads,
+  };
+}
+
+export function normalizeThread(rows, { toolVersion = VERSION, selection, observedAt } = {}) {
   const warnings = [];
   const modelSelection = parseJsonField(
     rows.thread.model_selection_json,
@@ -192,16 +319,43 @@ export function normalizeThread(rows, { toolVersion = "0.1.0" } = {}) {
     addAdapterSpecific(thread, { modelSelectionJson: modelSelection.raw });
   }
 
-  return {
+  const turns = rows.turns.map((row) => normalizeTurn(row, warnings));
+
+  const normalized = {
     schemaVersion: SCHEMA_VERSION,
     toolVersion,
     thread,
-    turns: rows.turns.map((row) => normalizeTurn(row, warnings)),
+    turns,
     messages: rows.messages.map((row) => normalizeMessage(row, warnings)),
     activities: rows.activities.map((row) => normalizeActivity(row, warnings)),
     provider: normalizeProvider(rows.provider),
+    liveState: normalizeLiveState(rows.liveState, { observedAt }),
     warnings,
   };
+
+  if (selection !== null && selection !== undefined) {
+    normalized.selection = {
+      kind: selection.kind,
+      turnId: selection.turnId ?? null,
+      turnLimit: selection.turnLimit ?? null,
+      turnOffset: selection.turnOffset ?? null,
+      totalTurns: selection.totalTurns ?? null,
+      selectedTurnIds: turns.map((turn) => turn.turnId).filter((turnId) => turnId !== null),
+    };
+
+    // An exact turn ID that resolved to nothing is ambiguous with a legitimately empty
+    // window unless flagged explicitly. A turn-window offset past the end is a valid empty
+    // page and stays silent.
+    if (selection.kind === "turn" && turns.length === 0) {
+      warnings.push({
+        code: "TURN_NOT_FOUND",
+        message: "No turn matched the requested turn ID.",
+        details: { turnId: selection.turnId },
+      });
+    }
+  }
+
+  return normalized;
 }
 
-export { SCHEMA_VERSION };
+export { SCHEMA_VERSION, LIST_SCHEMA_VERSION, FIND_SCHEMA_VERSION };

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://t3-session.dev/schemas/tail-record.v1.json",
+  "title": "t3-session tail record",
+  "description": "One record emitted by a tail poll cycle. Data records within a cycle are emitted in the same chronological order as normalized JSONL. An upsert means replace-by-identifier: a record seen for the first time and a record whose content changed both arrive as upsert. Deletions are not reported.",
+  "type": "object",
+  "required": ["schemaVersion", "op", "recordType", "threadId", "observedAt", "cycle", "data"],
+  "properties": {
+    "schemaVersion": { "const": "t3-session.tail-record.v1" },
+    "op": {
+      "type": "string",
+      "enum": ["upsert", "live-state", "end"]
+    },
+    "recordType": {
+      "type": "string",
+      "enum": ["thread", "turn", "message", "activity", "live-state", "end"]
+    },
+    "threadId": { "type": ["string", "null"] },
+    "observedAt": {
+      "description": "The tool's own read timestamp for the cycle, in ISO-8601 UTC.",
+      "type": "string"
+    },
+    "cycle": {
+      "description": "1-based poll cycle counter. Data records always carry 1 or more; only an end record can carry 0, which means the tail was interrupted before its first cycle ran.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": false
+}

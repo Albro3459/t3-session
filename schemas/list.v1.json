@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://t3-session.dev/schemas/list.v1.json",
+  "title": "t3-session normalized thread list",
+  "description": "Paginated thread summaries returned by the list command. Thread summaries are metadata only and never contain message or activity text.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "toolVersion",
+    "filters",
+    "ordering",
+    "limit",
+    "offset",
+    "count",
+    "hasMore",
+    "threads"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "t3-session.list.v1" },
+    "toolVersion": { "type": "string" },
+    "filters": {
+      "type": "object",
+      "required": ["project", "since", "before"],
+      "properties": {
+        "project": { "type": ["string", "null"] },
+        "since": { "type": ["string", "null"] },
+        "before": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "ordering": {
+      "type": "object",
+      "required": ["sortBy", "direction"],
+      "properties": {
+        "sortBy": { "const": "updatedAt" },
+        "direction": { "type": "string", "enum": ["asc", "desc"] }
+      },
+      "additionalProperties": false
+    },
+    "limit": { "type": "integer", "minimum": 0 },
+    "offset": { "type": "integer", "minimum": 0 },
+    "count": { "type": "integer", "minimum": 0 },
+    "hasMore": { "type": "boolean" },
+    "threads": { "type": "array", "items": { "$ref": "#/$defs/threadSummary" } }
+  },
+  "$defs": {
+    "threadSummary": {
+      "type": "object",
+      "required": [
+        "id",
+        "projectId",
+        "title",
+        "project",
+        "branch",
+        "worktreePath",
+        "createdAt",
+        "updatedAt",
+        "latestUserMessageAt",
+        "latestTurnId"
+      ],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "projectId": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
+        "project": {
+          "type": ["object", "null"],
+          "properties": {
+            "title": { "type": ["string", "null"] },
+            "workspaceRoot": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "branch": { "type": ["string", "null"] },
+        "worktreePath": { "type": ["string", "null"] },
+        "createdAt": { "type": ["string", "null"] },
+        "updatedAt": { "type": ["string", "null"] },
+        "latestUserMessageAt": { "type": ["string", "null"] },
+        "latestTurnId": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

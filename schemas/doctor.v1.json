@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://t3-session.dev/schemas/doctor.v1.json",
+  "title": "t3-session installation diagnostics",
+  "description": "Diagnostic report describing whether the local T3 installation is readable and structurally valid. Emitted by the doctor command. Fields describing the database, schema, and counts are populated only when the database could be opened; an unreadable or missing database still emits a complete envelope with those fields null or empty.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "toolVersion",
+    "packageVersion",
+    "runtimeVersion",
+    "resolvedHome",
+    "home",
+    "databasePath",
+    "databaseReadable",
+    "database",
+    "walPath",
+    "walPresent",
+    "wal",
+    "schema",
+    "requiredTables",
+    "requiredColumns",
+    "schemaValid",
+    "counts",
+    "providerLogDirectory",
+    "providerLogDirectoryPresent",
+    "providerLogs",
+    "healthy",
+    "status",
+    "databaseError"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "t3-session.doctor.v1" },
+    "toolVersion": { "type": "string" },
+    "packageVersion": { "type": "string" },
+    "runtimeVersion": { "type": "string" },
+    "resolvedHome": { "type": "string" },
+    "home": { "$ref": "#/$defs/pathInspection" },
+    "databasePath": { "type": "string" },
+    "databaseReadable": { "type": "boolean" },
+    "database": { "$ref": "#/$defs/pathInspection" },
+    "walPath": { "type": "string" },
+    "walPresent": { "type": "boolean" },
+    "wal": { "$ref": "#/$defs/pathInspection" },
+    "schema": { "$ref": "#/$defs/schemaInspection" },
+    "requiredTables": { "type": "array", "items": { "type": "string" } },
+    "requiredColumns": { "$ref": "#/$defs/columnsByTable" },
+    "schemaValid": { "type": "boolean" },
+    "counts": {
+      "type": ["object", "null"],
+      "required": ["threads", "messages", "activities"],
+      "properties": {
+        "threads": { "type": "integer", "minimum": 0 },
+        "messages": { "type": "integer", "minimum": 0 },
+        "activities": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "providerLogDirectory": { "type": "string" },
+    "providerLogDirectoryPresent": { "type": "boolean" },
+    "providerLogs": { "$ref": "#/$defs/pathInspection" },
+    "healthy": { "type": "boolean" },
+    "status": { "type": "string", "enum": ["ok", "error"] },
+    "databaseError": {
+      "type": ["object", "null"],
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "pathInspection": {
+      "type": "object",
+      "required": ["path", "exists", "isExpectedType", "readable", "error"],
+      "properties": {
+        "path": { "type": "string" },
+        "exists": { "type": "boolean" },
+        "isExpectedType": { "type": "boolean" },
+        "readable": { "type": "boolean" },
+        "error": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "columnsByTable": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    },
+    "schemaInspection": {
+      "type": "object",
+      "required": [
+        "valid",
+        "requiredTables",
+        "presentTables",
+        "missingTables",
+        "requiredColumns",
+        "presentColumns",
+        "missingColumns"
+      ],
+      "properties": {
+        "valid": { "type": "boolean" },
+        "requiredTables": { "type": "array", "items": { "type": "string" } },
+        "presentTables": { "type": "array", "items": { "type": "string" } },
+        "missingTables": { "type": "array", "items": { "type": "string" } },
+        "requiredColumns": { "$ref": "#/$defs/columnsByTable" },
+        "presentColumns": { "$ref": "#/$defs/columnsByTable" },
+        "missingColumns": { "$ref": "#/$defs/columnsByTable" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
