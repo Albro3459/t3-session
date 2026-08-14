@@ -21,6 +21,9 @@ import {
   DELETED_THREAD_ID,
   EMPTY_THREAD_ID,
   FLAT_THREAD_ID,
+  prepareActivityInsert,
+  prepareTurnInsert,
+  PROJECTION_SCHEMA_SQL,
   SELF_PARENT_THREAD_ID,
   TREE_THREAD_ID,
   TYPE_COERCION_THREAD_ID,
@@ -62,76 +65,7 @@ function createTurnScopedFixture() {
   const databasePath = path.join(directory, "state.sqlite");
   const database = new DatabaseSync(databasePath);
 
-  database.exec(`
-    CREATE TABLE projection_projects (
-      project_id TEXT PRIMARY KEY,
-      title TEXT,
-      workspace_root TEXT
-    );
-    CREATE TABLE projection_threads (
-      thread_id TEXT PRIMARY KEY,
-      project_id TEXT,
-      title TEXT,
-      branch TEXT,
-      worktree_path TEXT,
-      latest_turn_id TEXT,
-      created_at TEXT,
-      updated_at TEXT,
-      latest_user_message_at TEXT,
-      deleted_at TEXT,
-      runtime_mode TEXT,
-      interaction_mode TEXT,
-      model_selection_json TEXT
-    );
-    CREATE TABLE projection_thread_messages (
-      message_id TEXT PRIMARY KEY,
-      thread_id TEXT,
-      turn_id TEXT,
-      role TEXT,
-      text TEXT,
-      is_streaming INTEGER,
-      created_at TEXT,
-      updated_at TEXT,
-      attachments_json TEXT
-    );
-    CREATE TABLE projection_thread_activities (
-      activity_id TEXT PRIMARY KEY,
-      thread_id TEXT,
-      turn_id TEXT,
-      tone TEXT,
-      kind TEXT,
-      summary TEXT,
-      payload_json TEXT,
-      created_at TEXT,
-      sequence INTEGER
-    );
-    CREATE TABLE projection_thread_sessions (
-      thread_id TEXT PRIMARY KEY,
-      provider_name TEXT,
-      provider_session_id TEXT,
-      provider_thread_id TEXT,
-      provider_instance_id TEXT,
-      status TEXT,
-      last_error TEXT
-    );
-    CREATE TABLE projection_turns (
-      row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      thread_id TEXT,
-      turn_id TEXT,
-      pending_message_id TEXT,
-      source_proposed_plan_thread_id TEXT,
-      source_proposed_plan_id TEXT,
-      assistant_message_id TEXT,
-      state TEXT,
-      requested_at TEXT,
-      started_at TEXT,
-      completed_at TEXT,
-      checkpoint_turn_count INTEGER,
-      checkpoint_ref TEXT,
-      checkpoint_status TEXT,
-      checkpoint_files_json TEXT
-    );
-  `);
+  database.exec(PROJECTION_SCHEMA_SQL);
 
   const thread = database.prepare(`
     INSERT INTO projection_threads (
@@ -145,14 +79,7 @@ function createTurnScopedFixture() {
   thread.run(TURN_SCOPED_GHOST_THREAD_ID, "Genuinely missing parent", TURN_SCOPED_GHOST_TURN,
     "2026-04-02T00:00:00.000Z", "2026-04-02T00:20:00.000Z");
 
-  const turn = database.prepare(`
-    INSERT INTO projection_turns (
-      thread_id, turn_id, pending_message_id, source_proposed_plan_thread_id,
-      source_proposed_plan_id, assistant_message_id, state, requested_at, started_at,
-      completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status,
-      checkpoint_files_json
-    ) VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
-  `);
+  const turn = prepareTurnInsert(database);
   turn.run(TURN_SCOPED_THREAD_ID, TURN_SCOPED_TURN_1, "completed",
     "2026-04-01T00:00:10.000Z", "2026-04-01T00:00:11.000Z", "2026-04-01T00:00:59.000Z");
   turn.run(TURN_SCOPED_THREAD_ID, TURN_SCOPED_TURN_2, "completed",
@@ -160,11 +87,7 @@ function createTurnScopedFixture() {
   turn.run(TURN_SCOPED_GHOST_THREAD_ID, TURN_SCOPED_GHOST_TURN, "completed",
     "2026-04-02T00:00:10.000Z", "2026-04-02T00:00:11.000Z", "2026-04-02T00:00:59.000Z");
 
-  const activity = database.prepare(`
-    INSERT INTO projection_thread_activities (
-      activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
-    ) VALUES (?, ?, ?, 'info', ?, NULL, ?, ?, ?)
-  `);
+  const activity = prepareActivityInsert(database);
 
   // task A works only in T1; task B's only activity is in T2 and names A as its parent. A
   // selection over T2 alone never sees A's own activity.
@@ -190,76 +113,7 @@ function createFoldAcrossActivitiesFixture() {
   const databasePath = path.join(directory, "state.sqlite");
   const database = new DatabaseSync(databasePath);
 
-  database.exec(`
-    CREATE TABLE projection_projects (
-      project_id TEXT PRIMARY KEY,
-      title TEXT,
-      workspace_root TEXT
-    );
-    CREATE TABLE projection_threads (
-      thread_id TEXT PRIMARY KEY,
-      project_id TEXT,
-      title TEXT,
-      branch TEXT,
-      worktree_path TEXT,
-      latest_turn_id TEXT,
-      created_at TEXT,
-      updated_at TEXT,
-      latest_user_message_at TEXT,
-      deleted_at TEXT,
-      runtime_mode TEXT,
-      interaction_mode TEXT,
-      model_selection_json TEXT
-    );
-    CREATE TABLE projection_thread_messages (
-      message_id TEXT PRIMARY KEY,
-      thread_id TEXT,
-      turn_id TEXT,
-      role TEXT,
-      text TEXT,
-      is_streaming INTEGER,
-      created_at TEXT,
-      updated_at TEXT,
-      attachments_json TEXT
-    );
-    CREATE TABLE projection_thread_activities (
-      activity_id TEXT PRIMARY KEY,
-      thread_id TEXT,
-      turn_id TEXT,
-      tone TEXT,
-      kind TEXT,
-      summary TEXT,
-      payload_json TEXT,
-      created_at TEXT,
-      sequence INTEGER
-    );
-    CREATE TABLE projection_thread_sessions (
-      thread_id TEXT PRIMARY KEY,
-      provider_name TEXT,
-      provider_session_id TEXT,
-      provider_thread_id TEXT,
-      provider_instance_id TEXT,
-      status TEXT,
-      last_error TEXT
-    );
-    CREATE TABLE projection_turns (
-      row_id INTEGER PRIMARY KEY AUTOINCREMENT,
-      thread_id TEXT,
-      turn_id TEXT,
-      pending_message_id TEXT,
-      source_proposed_plan_thread_id TEXT,
-      source_proposed_plan_id TEXT,
-      assistant_message_id TEXT,
-      state TEXT,
-      requested_at TEXT,
-      started_at TEXT,
-      completed_at TEXT,
-      checkpoint_turn_count INTEGER,
-      checkpoint_ref TEXT,
-      checkpoint_status TEXT,
-      checkpoint_files_json TEXT
-    );
-  `);
+  database.exec(PROJECTION_SCHEMA_SQL);
 
   const thread = database.prepare(`
     INSERT INTO projection_threads (
@@ -271,14 +125,7 @@ function createFoldAcrossActivitiesFixture() {
   thread.run(FOLD_THREAD_ID, "Fold across activities", FOLD_TURN_B,
     "2026-05-01T00:00:00.000Z", "2026-05-01T00:20:00.000Z");
 
-  const turn = database.prepare(`
-    INSERT INTO projection_turns (
-      thread_id, turn_id, pending_message_id, source_proposed_plan_thread_id,
-      source_proposed_plan_id, assistant_message_id, state, requested_at, started_at,
-      completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status,
-      checkpoint_files_json
-    ) VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
-  `);
+  const turn = prepareTurnInsert(database);
   turn.run(FOLD_THREAD_ID, FOLD_COMMON_TURN, "completed",
     "2026-05-01T00:00:10.000Z", "2026-05-01T00:00:11.000Z", "2026-05-01T00:00:59.000Z");
   turn.run(FOLD_THREAD_ID, FOLD_TURN_A, "completed",
@@ -286,11 +133,7 @@ function createFoldAcrossActivitiesFixture() {
   turn.run(FOLD_THREAD_ID, FOLD_TURN_B, "completed",
     "2026-05-01T00:10:10.000Z", "2026-05-01T00:10:11.000Z", "2026-05-01T00:10:59.000Z");
 
-  const activity = database.prepare(`
-    INSERT INTO projection_thread_activities (
-      activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
-    ) VALUES (?, ?, ?, 'info', ?, NULL, ?, ?, ?)
-  `);
+  const activity = prepareActivityInsert(database);
 
   // isBackgrounded folded across activities, not just type-checked within one: true then a
   // later false must fold to false -- the later non-null value wins, and false is not treated

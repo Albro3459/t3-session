@@ -20,12 +20,9 @@ function taskPayload(values) {
   return JSON.stringify(values);
 }
 
-export function createParticipantFixture() {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "t3-session-participants-"));
-  const databasePath = path.join(directory, "state.sqlite");
-  const database = new DatabaseSync(databasePath);
-
-  database.exec(`
+// Shared with the local fixture builders in participants.test.js, which need the same
+// projection schema against their own standalone databases.
+export const PROJECTION_SCHEMA_SQL = `
     CREATE TABLE projection_projects (
       project_id TEXT PRIMARY KEY,
       title TEXT,
@@ -94,7 +91,35 @@ export function createParticipantFixture() {
       checkpoint_status TEXT,
       checkpoint_files_json TEXT
     );
+  `;
+
+// Also shared with participants.test.js's local fixture builders: the turn and activity
+// insert statements are identical across every projection fixture in this repo.
+export function prepareTurnInsert(database) {
+  return database.prepare(`
+    INSERT INTO projection_turns (
+      thread_id, turn_id, pending_message_id, source_proposed_plan_thread_id,
+      source_proposed_plan_id, assistant_message_id, state, requested_at, started_at,
+      completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status,
+      checkpoint_files_json
+    ) VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
   `);
+}
+
+export function prepareActivityInsert(database) {
+  return database.prepare(`
+    INSERT INTO projection_thread_activities (
+      activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
+    ) VALUES (?, ?, ?, 'info', ?, NULL, ?, ?, ?)
+  `);
+}
+
+export function createParticipantFixture() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "t3-session-participants-"));
+  const databasePath = path.join(directory, "state.sqlite");
+  const database = new DatabaseSync(databasePath);
+
+  database.exec(PROJECTION_SCHEMA_SQL);
 
   database
     .prepare("INSERT INTO projection_projects (project_id, title, workspace_root) VALUES (?, ?, ?)")
@@ -126,14 +151,7 @@ export function createParticipantFixture() {
   thread.run(TYPE_COERCION_THREAD_ID, "participant-project", "Field and identifier typing", null,
     "2026-03-09T00:00:00.000Z", "2026-03-09T01:00:00.000Z", null);
 
-  const turn = database.prepare(`
-    INSERT INTO projection_turns (
-      thread_id, turn_id, pending_message_id, source_proposed_plan_thread_id,
-      source_proposed_plan_id, assistant_message_id, state, requested_at, started_at,
-      completed_at, checkpoint_turn_count, checkpoint_ref, checkpoint_status,
-      checkpoint_files_json
-    ) VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
-  `);
+  const turn = prepareTurnInsert(database);
   turn.run(FLAT_THREAD_ID, "pturn-1", "completed",
     "2026-03-01T00:00:10.000Z", "2026-03-01T00:00:11.000Z", "2026-03-01T00:00:59.000Z");
   turn.run(FLAT_THREAD_ID, "pturn-2", "completed",
@@ -151,11 +169,7 @@ export function createParticipantFixture() {
   turn.run(TYPE_COERCION_THREAD_ID, "tcturn-1", "completed",
     "2026-03-07T00:00:10.000Z", "2026-03-07T00:00:11.000Z", "2026-03-07T00:00:59.000Z");
 
-  const activity = database.prepare(`
-    INSERT INTO projection_thread_activities (
-      activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
-    ) VALUES (?, ?, ?, 'info', ?, NULL, ?, ?, ?)
-  `);
+  const activity = prepareActivityInsert(database);
 
   // Flat thread: two independent tasks in turn 1 that are adjacent in time and sequence with
   // no parentAgentId, plus a later task in turn 2. Adjacency must never become hierarchy.
