@@ -8,7 +8,7 @@ Use `list` to identify a candidate instead of guessing a thread ID:
 
 ```bash
 t3-session list --reverse --limit 20 --format json
-t3-session list --project "CodeLaunch" --since 2026-08-10 --format json
+t3-session list --project "Example Project" --since 2026-08-10 --format json
 ```
 
 Narrow with `--project`, `--since`, `--before`, `--limit`, and `--offset` so the returned page stays small. `--reverse` returns the most recently updated threads first. Read `hasMore` in the response to know whether to page further with `--offset` rather than widening `--limit` unnecessarily. `list` output is metadata only (title, project, branch, worktree path, timestamps) — it never contains message or activity text, so it is safe to inspect broadly before committing to one thread ID.

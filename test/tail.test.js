@@ -25,6 +25,7 @@ import {
   createFixtureDatabase,
   WINDOW_THREAD_ID,
 } from "./fixtures/sqlite-fixture.js";
+import { assertMatchesSchema } from "./fixtures/schema-assert.js";
 
 // Every test drives an injected now()/sleep() pair so nothing here depends on real
 // elapsed time. sleep is also where fixture mutations happen between cycles.
@@ -472,20 +473,7 @@ test("every emitted record validates against schemas/tail-record.v1.json", async
   const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
 
   function assertValid(record) {
-    for (const key of schema.required) {
-      assert.ok(Object.hasOwn(record, key), `missing required key "${key}"`);
-    }
-    for (const key of Object.keys(record)) {
-      assert.ok(Object.hasOwn(schema.properties, key), `unexpected key "${key}"`);
-    }
-    assert.equal(record.schemaVersion, "t3-session.tail-record.v1");
-    assert.ok(schema.properties.op.enum.includes(record.op));
-    assert.ok(schema.properties.recordType.enum.includes(record.recordType));
-    assert.equal(typeof record.threadId, "string");
-    assert.equal(typeof record.observedAt, "string");
-    assert.ok(Number.isInteger(record.cycle) && record.cycle >= schema.properties.cycle.minimum);
-    assert.equal(typeof record.data, "object");
-    assert.ok(record.data !== null);
+    assertMatchesSchema(record, schema, schema, "record");
   }
 
   const fixture = createFixtureDatabase();

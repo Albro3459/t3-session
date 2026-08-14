@@ -68,7 +68,7 @@ Find a thread:
 
 ```bash
 t3-session list --reverse --limit 20 --format json
-t3-session list --project "CodeLaunch" --since 2026-08-10 --format json
+t3-session list --project "Example Project" --since 2026-08-10 --format json
 t3-session find --title "project topic" --format json
 ```
 

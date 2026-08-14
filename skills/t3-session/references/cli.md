@@ -433,6 +433,32 @@ Exit codes (see [Exit codes](#exit-codes)):
 }
 ```
 
+With a turn selection, a child can keep its real parent ID even when the parent’s own
+activities are outside the selected turns. It is then surfaced at the top level with a null
+path and a `PARENT_OUT_OF_SELECTION` warning, for example:
+
+```json
+{
+  "selection": { "kind": "turn", "turnId": "turn-2" },
+  "participants": [
+    {
+      "taskId": "child-task",
+      "parentTaskId": "root-task",
+      "path": null,
+      "depth": 0,
+      "children": []
+    }
+  ],
+  "warnings": [
+    {
+      "code": "PARENT_OUT_OF_SELECTION",
+      "message": "A recorded parent's activities fall outside the selected turns, so the child is reported at the top level.",
+      "details": { "taskIds": ["child-task"] }
+    }
+  ]
+}
+```
+
 ## Search and diagnose
 
 ```bash

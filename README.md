@@ -34,7 +34,7 @@ const client = await createT3SessionClient({ home: process.env.T3_HOME });
 const thread = await client.getThread("THREAD_ID");
 const recentTurn = await client.getThread("THREAD_ID", { lastTurn: true });
 const found = await client.findThreads({ title: "topic" }); // { schemaVersion, filters, ordering, count, threads }
-const page = await client.listThreads({ project: "CodeLaunch", since: "2026-08-10", limit: 20 });
+const page = await client.listThreads({ project: "Example Project", since: "2026-08-10", limit: 20 });
 
 const tail = client.tailThread("THREAD_ID", { maxCycles: 5, turnLimit: 2 });
 for await (const record of tail) { /* t3-session.tail-record.v1 */ }
@@ -59,7 +59,7 @@ The derived database is `<home>/userdata/state.sqlite`. Use `--db PATH` for an i
 ```bash
 t3-session list
 t3-session list --reverse --limit 20 --format json
-t3-session list --project "CodeLaunch" --since 2026-08-10 --format json
+t3-session list --project "Example Project" --since 2026-08-10 --format json
 ```
 
 Supported options:
