@@ -101,7 +101,7 @@ function stringOrNull(value) {
   return null;
 }
 
-// Null created_at sorts last, matching the Increment 1 ordering rule.
+// Null created_at sorts last, matching the shared ordering rule list and find use.
 function compareActivityRows(a, b) {
   const left = a.created_at ?? null;
   const right = b.created_at ?? null;
@@ -124,8 +124,8 @@ function compareActivityRows(a, b) {
   return 0;
 }
 
-// Direction-aware so a reversed listing cannot flip null firstSeenAt to the front: the
-// Increment 1 rule is that a null ordering timestamp sorts last in both directions.
+// Direction-aware so a reversed listing cannot flip null firstSeenAt to the front: a null
+// ordering timestamp sorts last in both directions.
 function compareParticipants(a, b, reverse = false) {
   const left = a.firstSeenAt ?? null;
   const right = b.firstSeenAt ?? null;
