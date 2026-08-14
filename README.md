@@ -117,7 +117,7 @@ streamingMessageCount   count of messages currently marked streaming
 reasons                 sorted array of codes explaining why complete is false
 ```
 
-`reasons` is drawn from a closed set: `"turn-not-terminal"`, `"streaming-message"`, `"provider-active"`. It is empty exactly when `complete` is `true`. `liveState` describes the thread, not the retrieval window: a bounded `--last-turn` read reports the same `liveState` as a full read of the same thread at the same moment. It is derived from projected signals only — the latest turn's state, streaming message rows, and the provider session status — never from timestamp recency. A thread is not considered active merely because it was updated recently.
+`reasons` is drawn from a closed set: `"turn-not-terminal"`, `"streaming-message"`, `"provider-active"`. It is empty exactly when `complete` is `true`. `liveState` describes the thread, not the retrieval window: a bounded `--last-turn` read reports the same `liveState` as a full read of the same thread at the same moment. It is derived from projected signals only — the latest turn's state, streaming message rows, and the provider session status — never from timestamp recency. A thread is not considered active merely because it was updated recently. The converse limit is worth stating plainly: `complete: true` means the projection shows no in-flight signal, not that no agent is working — an upstream projection can mark a turn `completed` while an agent is still mid-turn.
 
 ## Follow a live thread
 

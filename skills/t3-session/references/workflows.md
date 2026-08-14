@@ -94,7 +94,13 @@ t3-session tail THREAD_ID --max-cycles 5 --turn-limit 2 --format jsonl
 
 ### A thread that never becomes complete
 
-`liveState.reasons` explains why `complete` is `false`: `"turn-not-terminal"` means the latest turn's state is not one of the known terminal states (an unrecognized turn state is deliberately treated as non-terminal, since guessing that an unfamiliar state means "finished" is the more damaging error); `"streaming-message"` means at least one message row is still marked streaming; `"provider-active"` means the provider session status itself is an active-looking value. If a thread stays incomplete across repeated checks, report it as still active and describe which reasons are present — do not wait indefinitely for `complete` to become `true`, and do not infer completion from elapsed time.
+`liveState.reasons` explains why `complete` is `false`:
+
+- `"turn-not-terminal"` — the latest turn's state is not one of the known terminal states. An unrecognized turn state is deliberately treated as non-terminal, since guessing that an unfamiliar state means "finished" is the more damaging error.
+- `"streaming-message"` — at least one message row is still marked streaming.
+- `"provider-active"` — the provider session status itself is an active-looking value.
+
+If a thread stays incomplete across repeated checks, report it as still active and describe which reasons are present — do not wait indefinitely for `complete` to become `true`, and do not infer completion from elapsed time.
 
 ### A tail that emits nothing
 
@@ -126,7 +132,11 @@ Never claim one agent invoked another unless `parentTaskId` is populated on the 
 
 For a quick summary, use each participant's `state` (`"finished"`, `"running"`, or `"unknown"`) rather than the raw `status`, and report `"unknown"` honestly instead of guessing that a task finished.
 
-Report `UNRESOLVED_PARENT` and `PARENT_CYCLE` warnings if present rather than hiding them — they describe a projection that recorded a parent that does not resolve, or contradictory parentage, and the affected participants are correctly reported as roots with no path. A task whose recorded parent is itself is a one-node cycle and is reported as `PARENT_CYCLE`, not `UNRESOLVED_PARENT`. A task merely downstream of a cycle keeps its own explicit `parentTaskId` and only loses its `path` — only tasks actually on the cycle are demoted to roots.
+Report `UNRESOLVED_PARENT`, `PARENT_CYCLE`, and `PARENT_OUT_OF_SELECTION` warnings if present rather than hiding them — full definitions and a comparison table are in `references/cli.md`. Quick distinction:
+
+- `UNRESOLVED_PARENT` — the recorded parent does not resolve to any task anywhere in the thread (data problem).
+- `PARENT_OUT_OF_SELECTION` — the parent resolves to a real task, just one whose own activities fall outside the current `--turn`/`--turn-limit`/`--turn-offset`/`--last-turn` window (narrow-window problem, not corruption); the child keeps `parentTaskId` but gets `path: null` and is reported at the top level.
+- `PARENT_CYCLE` — contradictory parentage forms a loop, including a task naming itself as its own parent (a one-node cycle, reported as `PARENT_CYCLE`, not `UNRESOLVED_PARENT`). A task merely downstream of a cycle keeps its own explicit `parentTaskId` and loses only its `path` — only tasks actually on the cycle are demoted to roots.
 
 On a participant-heavy thread, bound the view instead of loading everything:
 
@@ -137,7 +147,11 @@ t3-session participants THREAD_ID --turn TURN_ID --format jsonl
 
 `--last-turn`, `--turn`, `--turn-limit`, or `--limit` keep the response small; real threads have been observed with 261 distinct tasks.
 
-Watch `counts` when paging: `counts.total` is how many participants matched before `--limit`/`--offset`, and `counts.participants` is how many were actually returned in this page, so the two differ exactly when the result was truncated. `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` describe every participant matching the current turn selection before paging, so they do not shrink when `--limit`/`--offset` does. Do not read them as claims about only what came back in a small page — and equally, do not read them as claims about the whole thread when a turn option is in play, since a turn selection narrows what those fields are computed from.
+Watch `counts` when paging — `references/cli.md` has the full field-by-field table. Short version:
+
+- `counts.total` vs. `counts.participants` differ exactly when `--limit`/`--offset` truncated the result.
+- `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` are all computed before paging (so they never shrink because of `--limit`/`--offset`) but are narrowed by an active turn selection (so they describe only the selected turns, not necessarily the whole thread).
+- Don't read a small page's `counts` as a claim about the whole thread, and don't read a turn-bounded `counts` as a claim about turns outside the selection.
 
 ### A thread with no participants
 
@@ -153,9 +167,11 @@ A visually flat or partial tree can also happen with `hierarchyAvailable: true`,
 
 `--turn`, `--turn-limit`, `--turn-offset`, and `--last-turn` all bound participants to activities tagged with specific turn IDs. A `task.*` activity recorded with a null `turn_id` can never match that bound, so it never appears in a turn-bounded read — this is deliberate, the same rule `get`'s turn-bounded windows follow, and not a bug. If a participant you expect is missing from a bounded view, re-run `participants` without any turn-selection option to see the whole thread before concluding the participant is absent.
 
+The same applies to a *parent*: a child can still appear in a bounded view (with `parentTaskId` populated) while its parent's own activities sit outside the window. That case is called out explicitly by a `PARENT_OUT_OF_SELECTION` warning rather than left for you to notice from a missing tree branch.
+
 ### A participant stuck in `running`
 
-A participant reported with `state: "running"` may simply have ended without a terminal status ever being projected, rather than still being active. Cross-check the thread's `liveState.complete` (Increment 2) before claiming an agent is still working — if `liveState.complete` is `true`, the thread has settled even if a participant's `state` still reads `"running"`.
+A participant reported with `state: "running"` may simply have ended without a terminal status ever being projected, rather than still being active. Cross-check the thread's `liveState.complete`, but treat it as a signal, not proof: `complete: true` means the projection shows no in-flight signal, which usually explains a stuck `"running"` participant as a status that never got finalized — it is not a guarantee that no agent is still working, since the upstream projection can mark a turn `completed` while an agent is still mid-turn. Report both readings rather than asserting the thread has settled.
 
 ## Partial provider history
 

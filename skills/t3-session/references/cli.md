@@ -12,6 +12,19 @@ t3-session --db <state-db> get <thread-id>
 
 Resolution order is `--home`, `T3_HOME`, then the default T3 home. `--db` overrides the derived SQLite path and is useful for isolated fixtures.
 
+## Exit codes
+
+Every command shares this set; sections below note only the codes reachable from that command.
+
+| Code | Meaning | Example |
+| --- | --- | --- |
+| 0 | Success | Normal output, or a valid empty result (e.g. an offset past the end) |
+| 1 | Unexpected failure | Any error not classified below |
+| 2 | Thread not found | `get`/`participants`/`tail` on an ID that matches nothing; `tail` when the thread disappears mid-run |
+| 3 | Invalid arguments | Rejected or malformed options; validated before SQLite is opened |
+| 4 | Database unavailable | Missing/unreadable database, missing projection schema, unreadable provider log, or a `tail` cycle that exhausts its retries |
+| 5 | Raw JSONL partially unreadable | `get --raw-jsonl` hit at least one malformed provider line; valid records are still emitted on stdout, diagnostics on stderr |
+
 ## List threads
 
 ```bash
@@ -29,6 +42,8 @@ Options:
 - `--limit <n>` — maximum threads returned; default 50; non-negative integer.
 - `--offset <n>` — skip matching threads before applying `--limit`; default 0; non-negative integer.
 - `--reverse` — newest-first instead of the default oldest-first.
+
+Timezone rule for `--since`/`--before`: a date-time with no UTC offset is interpreted as **UTC**, not the host's local zone — matching the date-only form (already UTC) and matching UTC storage. `--since 2026-08-10T09:00` and `--since 2026-08-10T09:00Z` are identical. The space-separated form `--since "2026-08-10 09:00"` is treated the same way. `Z` and explicit `+HH:MM`/`-HH:MM` offsets are parsed as given, unchanged.
 
 Invalid timestamps, limits, offsets, or an empty project filter produce the existing machine-readable `t3-session.error.v1` error before SQLite is opened.
 
@@ -50,7 +65,7 @@ t3-session get <thread-id> --turn-limit <n> --turn-offset <n>
 
 The default format shows thread metadata, provider metadata, turns, messages, activities, and warnings. JSON emits the complete `t3-session.thread.v1` object. Normalized JSONL emits `thread`, `turn`, `message`, and `activity` records using `t3-session.jsonl-record.v1`, in chronological order after the thread header — this is the default and only order for `get --format jsonl`; do not re-sort records.
 
-`--raw-jsonl` emits parsed provider records one per line. A malformed provider line is reported on stderr and does not discard valid records.
+`--raw-jsonl` emits parsed provider records one per line. A malformed provider line is reported on stderr and does not discard valid records; if any line was malformed the command still emits every valid record but exits 5 (`RAW_JSONL_PARTIALLY_UNREADABLE`), not 0.
 
 ### Bounded retrieval
 
@@ -73,7 +88,7 @@ Bounded output carries a `selection` object on the normalized thread: `kind` (`"
 `liveState` is always present on `getThread()` output, unlike `selection`, which appears only for bounded reads:
 
 - `status` — `"active"`, `"idle"`, or `"unknown"`; `"unknown"` means the projection gave no usable signal, not a default for a settled thread.
-- `complete` — `false` while the thread still appears to be changing, `true` once settled. Describes the thread, not the retrieval window: a bounded `--last-turn` read reports the same `liveState` as a full read of the same thread at the same moment.
+- `complete` — `false` while the projection shows the thread changing; `true` when it shows no in-flight signal. `true` is not proof that no agent is working: the upstream projection can mark a turn `completed` while an agent is still mid-turn, and this field faithfully reports the projected signal rather than inferring activity from timestamp recency. Describes the thread, not the retrieval window: a bounded `--last-turn` read reports the same `liveState` as a full read of the same thread at the same moment.
 - `observedAt` — the tool's own read timestamp, ISO-8601 UTC.
 - `providerStatus` — the thread's provider session status, or `null`.
 - `latestTurnId` — the latest turn's identifier, or `null`.
@@ -127,7 +142,7 @@ data            the record payload
 - `"interrupt"` — SIGINT (or an aborted `AbortSignal` in the Node API) stopped the tail.
 - `"thread-not-found"` — the thread disappeared or became unreadable mid-tail.
 
-Deletions are out of scope for this increment: a record that disappears from the projection is not reported.
+Deletions are out of scope: a record that disappears from the projection is not reported.
 
 ### Interruption, retries, and exit codes
 
@@ -137,7 +152,7 @@ Deletions are out of scope for this increment: a record that disappears from the
 - **A thread that disappears mid-tail** emits the `end` record with reason `"thread-not-found"` and exits 2, matching `ThreadNotFoundError`.
 - **A missing thread at startup** behaves exactly like `get`: `ThreadNotFoundError`, exit 2, nothing on stdout.
 
-Exit codes are unchanged from Increment 1.
+These are the same exit codes used elsewhere (0, 2, 4); see [Exit codes](#exit-codes).
 
 ## Thread participants
 
@@ -170,9 +185,24 @@ Ordering: sorted by `firstSeenAt`, then by `taskId` as a tie-breaker, in the sam
 
 ### Participant fields
 
-Every participant carries `taskId`, `parentTaskId`, `path`, `depth`, `title`, `role`, `model`, `agentKind`, `taskType`, `effort`, `status`, `state`, `summary`, `detail`, `error`, `toolUseId`, `lastToolName`, `workflowName`, `outputFile`, `isBackgrounded`, `turnId`, `turnIds`, `firstSeenAt`, `lastSeenAt`, `activityCount`, and `usage`. Every field is always present; absent projection data is `null`, never a missing key. `usage` has `totalTokens`, `toolUses`, `durationMs`, normalized from whichever of `typedUsage` or the snake_case `usage` is present, preferring `typedUsage`; unknown values stay `null`, not `0`. Anything the projection carries that is not modeled above (`phases`, `runHandles`, `timelineBypass`, `usageSnapshot`, `attempt`, `agentIndex`, `phaseIndex`, `phaseTitle`, and similar) appears under `adapterSpecific`, never as a top-level field.
+Every participant always carries the same field set; absent projection data is `null`, never a missing key:
 
-`state` versus `status`: `status` is the raw, projected value (or `null` if none was ever recorded). `state` is a derived summary — `"finished"` when `status` is one of the terminal values (`completed`, `failed`, `stopped`, `cancelled`), `"running"` when a non-terminal or unrecognised status was recorded, and `"unknown"` when no status was ever projected. An unrecognised status is deliberately reported as `"running"`, not `"finished"`, because claiming a still-running agent has finished is the more damaging error. `status: null` with `state: "unknown"` means the projection never recorded a status.
+`taskId`, `parentTaskId`, `path`, `depth`, `title`, `role`, `model`, `agentKind`, `taskType`, `effort`, `status`, `state`, `summary`, `detail`, `error`, `toolUseId`, `lastToolName`, `workflowName`, `outputFile`, `isBackgrounded`, `turnId`, `turnIds`, `firstSeenAt`, `lastSeenAt`, `activityCount`, `usage`.
+
+Fields worth calling out individually:
+
+- **`turnId`** — the **first non-null** `turn_id` among the participant's contributing activities, not the turn of the literal earliest activity. A task whose earliest activity carries a null `turn_id` still reports the real turn it was first seen working in, rather than `turnId: null`.
+- **`turnIds`** — every distinct non-null `turn_id` the participant touched, sorted.
+- **`usage`** — `{ totalTokens, toolUses, durationMs }`, normalized from whichever of `typedUsage` (camelCase) or the snake_case `usage` payload is present, preferring `typedUsage`; unknown values stay `null`, not `0`.
+- **`adapterSpecific`** — present only when non-empty. Holds everything the projection carries that is not modeled above (`phases`, `runHandles`, `timelineBypass`, `usageSnapshot`, `attempt`, `agentIndex`, `phaseIndex`, `phaseTitle`, and similar), plus one nuance for the modeled scalar fields (`title`, `role`, `model`, `agentKind`, `taskType`, `effort`, `status`, `summary`, `detail`, `error`, `toolUseId`, `lastToolName`, `workflowName`, `outputFile`, `isBackgrounded`): a value of the wrong type (e.g. `model` arriving as a number) is preserved in `adapterSpecific` **only if that field never resolved to a usable value from any activity in the fold**. If an earlier activity already produced a usable value for that field, a later wrong-typed value is dropped entirely — it appears neither at top level nor in `adapterSpecific`. This keeps the same key from ever appearing in both places, but it means a wrong-typed value is not always recoverable from the output.
+
+`state` is derived from `status`, not the same field:
+
+| `status` | `state` | Meaning |
+| --- | --- | --- |
+| `null` (never recorded) | `"unknown"` | No status was ever projected |
+| `completed` / `failed` / `stopped` / `cancelled` | `"finished"` | Terminal |
+| any other non-null value, including unrecognised strings | `"running"` | Non-terminal — an unrecognised status is deliberately reported as running rather than finished, since claiming a still-running agent finished is the more damaging error |
 
 ### Hierarchy
 
@@ -180,21 +210,39 @@ Every participant carries `taskId`, `parentTaskId`, `path`, `depth`, `title`, `r
 
 `hierarchyAvailable` is the machine-readable signal to check before presenting a tree: `true` only when at least one participant has a resolved `parentTaskId`. It is `false` for the great majority of real threads, and that is the correct, expected answer, not a failure.
 
-`path` (for example `main.subagent1.subagent1a`) is present only when a participant's entire ancestry to a root is explicitly known and resolvable; it is `null` when any ancestor is unresolved or cyclic. The synthetic first segment is always `main`. Sibling segments are numbered by the deterministic participant ordering (`firstSeenAt`, then `taskId` as a tie-breaker) — that ordering only assigns a label to an already-known child; it is never used to infer the parent/child edge itself, which always comes from `parentAgentId`. `depth` is `0` for a root and `parent.depth + 1` otherwise, computed only through resolved edges.
+`path` (for example `main.subagent1.subagent1a`) is present only when a participant's entire ancestry to a root is explicitly known and resolvable; it is `null` when any ancestor is unresolved, cyclic, or out of the turn selection (see `PARENT_OUT_OF_SELECTION` below). The synthetic first segment is always `main`. Sibling segments are numbered by the deterministic participant ordering (`firstSeenAt`, then `taskId` as a tie-breaker) — that ordering only assigns a label to an already-known child; it is never used to infer the parent/child edge itself, which always comes from `parentAgentId`. `depth` is `0` for a root and `parent.depth + 1` otherwise, computed only through resolved edges.
 
 A task whose `parentAgentId` equals its own `taskId` resolves — the identifier does name a known participant — so it is reported as `PARENT_CYCLE` (a one-node cycle), not `UNRESOLVED_PARENT`. A task that is merely downstream of a cycle, not on the cycle itself, keeps its own explicit `parentTaskId` and loses only its `path`, since ancestry through a broken link can no longer be confirmed; only tasks actually on the cycle are demoted to roots and named in `PARENT_CYCLE`.
 
-Warning codes:
+#### Warning codes
 
-- `UNRESOLVED_PARENT` — a `parentAgentId` was recorded but does not resolve to a known participant. `parentTaskId` stays `null`, `path` stays `null`, and the participant is reported as a root.
-- `PARENT_CYCLE` — recorded parentage forms a cycle (for example A's parent is B and B's parent is A, or a task naming itself as its own parent). The cycle members are reported as roots with `path: null` rather than hanging or overflowing.
-- `PARENT_OUT_OF_PAGE` — `--tree` combined with `--limit`/`--offset`, where a resolved parent falls outside the returned page. The child is surfaced at the top level instead of being dropped, and the warning names the affected child task IDs. `counts` and `hierarchyAvailable` describe everything matching before paging, not the page, so `hierarchyAvailable: true` can legitimately accompany a visually flat or partial tree — check this warning, not just the tree's shape, before concluding hierarchy is missing.
+| Code | Fires when | `parentTaskId` | `path` | Reported as | Counted in |
+| --- | --- | --- | --- | --- | --- |
+| `UNRESOLVED_PARENT` | Recorded `parentAgentId` resolves to no task anywhere in the thread — checked against the whole thread, not just the selected turns | `null` | `null` | Root | `counts.unresolvedParents`, `counts.roots` |
+| `PARENT_OUT_OF_SELECTION` | Under a turn selection (`--turn`, `--turn-limit`, `--turn-offset`, `--last-turn`) only: `parentAgentId` names a real task elsewhere in the thread, but that task's own activities fall outside the selected turns | populated | `null` | Top level | `counts.withExplicitParent` — **not** `counts.unresolvedParents` |
+| `PARENT_CYCLE` | Recorded parentage forms a cycle (A→B→A, or a task naming itself) | `null` (cleared) | `null` | Root | `counts.roots` — not `counts.withExplicitParent` |
+| `PARENT_OUT_OF_PAGE` | `--tree` with `--limit`/`--offset`: a parent that resolved *within the selection* falls outside the returned page | populated | unaffected (keeps its resolved value; only its position in the returned tree changes) | Top level, in the tree only | unaffected — counts are computed before paging |
+
+`details.taskIds` (sorted) lists the affected **child** task IDs for `PARENT_OUT_OF_SELECTION`, `PARENT_CYCLE`, and `PARENT_OUT_OF_PAGE`. `UNRESOLVED_PARENT` is emitted once per occurrence with `details: { taskId, parentAgentId }` instead of an aggregated list. A child reported under `PARENT_OUT_OF_SELECTION` is never also named by `PARENT_OUT_OF_PAGE` for the same missing parent — the two codes split the same "parent not in view" condition by cause (turn window vs. page).
 
 ### Envelope and exit codes
 
 `--format json` and `--format jsonl` emit `t3-session.participants.v1`: `schemaVersion`, `toolVersion`, `threadId`, `ordering`, `selection` (`null` for a whole-thread read, otherwise the turn selection), `counts`, `hierarchyAvailable`, `participants`, and `warnings`. `--format jsonl` emits `t3-session.jsonl-record.v1` records: a `participants` header record carrying the envelope metadata, followed by one `participant` record per participant.
 
-`counts` has two different scopes, and mixing them up is the easiest mistake a consumer can make: `counts.total` is the number of participants matching before `--limit`/`--offset` is applied, so truncation is detectable; `counts.participants` is how many were actually returned in this page. `counts.roots`, `counts.withExplicitParent`, `counts.unresolvedParents`, and `hierarchyAvailable` describe every participant matching the current turn selection before paging — they do not change when `--limit`/`--offset` shrinks what is returned. Note the qualifier: a turn selection narrows the rows those fields are computed from, because the query only reads activities tagged with the selected turns. With no turn selection they describe the whole thread; under `--turn`, `--turn-limit`, `--turn-offset`, or `--last-turn` they describe only the selected turns, so `hierarchyAvailable: false` on a bounded read is not evidence that the thread has no hierarchy in some other turn.
+`counts` has two different scopes; mixing them up is the easiest mistake a consumer can make:
+
+| Field | What it counts | Changes with `--limit`/`--offset`? | Changes with a turn selection? |
+| --- | --- | --- | --- |
+| `counts.total` | Participants matching before `--limit`/`--offset` — compare to `counts.participants` to detect truncation | No (this *is* the pre-paging count) | Yes — narrowed to the selected turns' activities |
+| `counts.participants` | Participants actually returned in this page | Yes — this is the page size | Yes (inherits the narrowing above) |
+| `counts.roots` | Participants with `parentTaskId === null`, before paging | No | Yes |
+| `counts.withExplicitParent` | Participants with `parentTaskId !== null`, before paging — includes `PARENT_OUT_OF_SELECTION` children | No | Yes |
+| `counts.unresolvedParents` | Count of `UNRESOLVED_PARENT` warnings only — excludes `PARENT_OUT_OF_SELECTION` | No | Yes |
+| `hierarchyAvailable` | `true` iff `counts.withExplicitParent > 0`, before paging | No | Yes |
+
+With no turn selection, the "before paging" columns describe the whole thread. Under `--turn`/`--turn-limit`/`--turn-offset`/`--last-turn`, they describe only the selected turns — so `hierarchyAvailable: false` on a bounded read is not evidence the thread has no hierarchy in some other turn, and a `PARENT_OUT_OF_SELECTION` warning (not `UNRESOLVED_PARENT`) is the signal that the missing edge is a narrow window, not corrupt data.
+
+Exit codes (see [Exit codes](#exit-codes)):
 
 - A thread that exists but has no task activities returns a valid envelope with an empty `participants` array, `counts.participants: 0`, and `hierarchyAvailable: false` — exit 0, not an error.
 - A missing thread is `ThreadNotFoundError`, exit 2, nothing on stdout, exactly as `get`.
